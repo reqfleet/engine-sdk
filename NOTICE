@@ -1,0 +1,7 @@
+engine-sdk
+Copyright reqfleet contributors
+
+This distribution contains source derived from reqfleet/shibuya,
+revision a07d9b52b033678746464db9d34a5a52d2198475.
+The extracted source is licensed under the Apache License, Version 2.0.
+Modified extracted files are marked in their source headers.
