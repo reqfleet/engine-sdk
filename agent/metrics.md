@@ -4,6 +4,11 @@ This document defines the `shibuya-v1` metrics reporting contract for engine
 adapters using `github.com/reqfleet/engine-sdk/agent`: collection modes, metric names, labels, units, and
 histogram boundaries. Adapters declare this profile in their configuration.
 
+The collector-free [`metricschema`](../metricschema) package owns the Go constants
+for metric names and reserved request labels, plus ordered label-list functions.
+The runtime and reporting clients use these shared definitions. Label lists are
+caller-owned; collectors, histogram bounds, and event recording remain in `agent`.
+
 ## Integration modes
 
 | Mode | `AgentServerOptions` | Ownership |

@@ -5,7 +5,7 @@ Locust, and Replay use the same supported callback contract available to engine
 adapters. The SDK has no dependency on the private Shibuya control-plane module.
 
 ```sh
-go get github.com/reqfleet/engine-sdk@v0.1.0
+go get github.com/reqfleet/engine-sdk@v0.1.1
 ```
 
 Go 1.26.9 or later is required.
@@ -16,6 +16,8 @@ Go 1.26.9 or later is required.
   process supervision, metric events, and the authenticated HTTP handler.
 - [`protocol`](protocol): wire messages, explicit run/artifact assignments,
   lifecycle and preparation status, structured errors, and artifact paths.
+- [`metricschema`](metricschema): dependency-free metric names, reserved request
+  labels, and ordered label definitions shared by producers and reporting clients.
 
 `internal` packages implement HTTPS artifact downloads, TLS subscriptions, and
 resource collection. They are not adapter extension APIs. Storage backends,
@@ -55,7 +57,12 @@ Prometheus endpoint is not automatically reporting-compatible. The
 [metrics contract](agent/metrics.md) defines required families, units, labels,
 buckets, and aggregation behavior.
 
-The Go API release `v0.1.0`, metrics profile `shibuya-v1`, and wire behavior are
+Use `metricschema` when constructing compatible producers or reporting queries.
+Its label-list functions return caller-owned slices; they do not expose collector
+state. Prometheus collectors remain private to `agent`, while query execution and
+reporting policy stay in the control plane.
+
+The Go API release `v0.1.1`, metrics profile `shibuya-v1`, and wire behavior are
 separate contracts. The existing wire envelope and subscription are unversioned;
 there is no protocol negotiation or unsupported-version rejection. This release
 does not introduce third-party engine registration or a reference k6/Gatling
