@@ -8,7 +8,8 @@ adapters. The SDK has no dependency on the private Shibuya control-plane module.
 go get github.com/reqfleet/engine-sdk@v0.1.1
 ```
 
-Go 1.26.9 or later is required.
+Go 1.25.0 or later is required for `sync.WaitGroup.Go` and the
+`golang.org/x/sys` dependency.
 
 ## Supported packages
 
@@ -19,10 +20,11 @@ Go 1.26.9 or later is required.
 - [`metricschema`](metricschema): dependency-free metric names, reserved request
   labels, and ordered label definitions shared by producers and reporting clients.
 
-`internal` packages implement HTTPS artifact downloads, TLS subscriptions, and
-resource collection. They are not adapter extension APIs. Storage backends,
-engine registration, control-plane reporting, and engine-specific configuration
-are not part of this module.
+`internal` packages provide the runtime's HTTPS artifact downloads, TLS
+subscriptions, and resource collection. Adapter extensions use the public
+`agent`, `protocol`, and `metricschema` packages. Storage backends, engine
+registration, control-plane reporting, and engine-specific configuration are
+managed outside this module.
 
 ## Adapter contract
 
