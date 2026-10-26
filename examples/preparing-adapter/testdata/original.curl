@@ -1,0 +1,8 @@
+silent
+show-error
+fail
+parallel-max = 1
+max-time = 5
+url = "http://127.0.0.1:18080/one"
+url = "http://127.0.0.1:18080/two"
+url = "http://127.0.0.1:18080/three"
