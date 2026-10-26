@@ -1,83 +1,71 @@
 # Engine SDK
 
-The public Go runtime for coordinator-managed Shibuya engine agents. JMeter,
-Locust, and Replay use the same supported callback contract available to engine
-adapters. The SDK has no dependency on the private Shibuya control-plane module.
+Engine SDK is the public Go runtime for running load-testing engines on
+**Reqfleet**. An engine agent (adapter) uses the SDK to manage a load generator
+and integrate it with Reqfleet's coordination and metrics collection.
+
+The SDK exposes the same callback contract used by the existing JMeter, Locust,
+and Replay engines. It was extracted from Reqfleet's Shibuya control plane and
+has no dependency on the private control-plane module. The extracted SDK is
+intended as a starting point for developers to add support for additional types
+of engines on Reqfleet.
+
+## Why this exists
+
+Running an engine on Reqfleet requires more than starting its executable. The
+engine must receive its assigned workload and input files, prepare dependencies,
+report readiness and results, and stop without leaving processes or files that
+interfere with the next run.
+
+The SDK provides that common runtime so each adapter can concentrate on the
+engine-specific work: translating an assigned run into native configuration,
+building the command, and mapping engine output into Reqfleet's reporting
+contract. Engines can retain their own execution model without each integration
+reimplementing coordinator communication and process supervision.
+
+## Basic architecture
+
+```mermaid
+flowchart TD
+    Coordinator["Reqfleet coordinator"]
+    Collector["Reqfleet metrics collector"]
+    subgraph Container["Engine container"]
+        Agent["Engine agent (adapter)<br/>using Engine SDK"]
+        Generator["Load generator"]
+        Agent -->|"prepares, launches, supervises, stops"| Generator
+        Generator -->|"results or native metrics"| Agent
+    end
+    Coordinator <-->|"lifecycle: pubsub over TCP (TLS)"| Agent
+    Collector -->|"scrapes metrics: HTTP GET /metrics"| Agent
+```
+
+The coordinator decides what each agent runs, including workload settings and
+per-file input assignments. The adapter translates that assignment; it does not
+redistribute workload. The runtime owns the primary process and serializes runs
+so cleanup finishes before the next run reuses the workspace.
+
+An agent requires a coordinator; this SDK is not a standalone engine runner.
+Engine registration, deployment, storage backends, and control-plane reporting
+remain outside this module. Implementing an adapter does not by itself register
+a new engine with Reqfleet.
+
+## Using the SDK
+
+Add the SDK to an adapter's Go module:
 
 ```sh
 go get github.com/reqfleet/engine-sdk@v0.1.1
 ```
 
-Go 1.25.0 or later is required for `sync.WaitGroup.Go` and the
-`golang.org/x/sys` dependency.
+Use the Go toolchain required by `go.mod` for the SDK revision you build; this
+checkout declares its requirement in [go.mod](go.mod). Pin the SDK version and
+review compatibility when upgrading: the Go API is pre-1.0.
 
-## Supported packages
+For adapter development, start with [AGENTS.md](AGENTS.md). It covers the public
+packages, callback lifecycle, configuration, workspace ownership, metrics
+integration, and verification workflow, with links to the detailed contracts.
 
-- [`agent`](agent/doc.go): runtime/options, per-run contexts, workspaces, commands,
-  process supervision, metric events, and the authenticated HTTP handler.
-- [`protocol`](protocol): wire messages, explicit run/artifact assignments,
-  lifecycle and preparation status, structured errors, and artifact paths.
-- [`metricschema`](metricschema): dependency-free metric names, reserved request
-  labels, and ordered label definitions shared by producers and reporting clients.
-
-`internal` packages provide the runtime's HTTPS artifact downloads, TLS
-subscriptions, and resource collection. Adapter extensions use the public
-`agent`, `protocol`, and `metricschema` packages. Storage backends, engine
-registration, control-plane reporting, and engine-specific configuration are
-managed outside this module.
-
-## Adapter contract
-
-Configure `agent.AgentServerOptions` with a `BuildCommand` callback and any needed
-preparation, observation, progress, or graceful-stop callbacks. Start the runtime
-with `agent.MakeAgentServer(options).Run()`. See the [package contract](agent/doc.go)
-for callback lifetime, cancellation, process supervision, and workspace details.
-
-The coordinator supplies an explicit assignment for each run; agents do not
-redistribute workload or derive input shards from their identity. Optional
-engine-specific progress does not determine lifecycle success. A completed work
-observation cannot conceal a failing process exit, and cleanup finishes before a
-subsequent run can reuse the workspace.
-
-`EngineMeta` and `CoordinatorRootCAs` provide explicit configuration. The factory
-otherwise reads the existing deployment environment: `engine_name`, `offset`,
-`coordinator_ip`, `coordinator_ca_cert`, `collection_id`, `plan_id`, `zone`,
-`api_key`, and `label_limit`. Workload commands receive assigned `engine_no` and
-`run_id`. `AGENT_ROOT` holds `test-conf`, `test-result`, and `run-tmp`; downloaded
-inputs remain in `/test-data`. Dependency state survives runs.
-
-`Handler()` exposes `GET /progress`, `GET /prepare-progress`, `GET /metrics`, and
-`GET /healthz`. All except health require the configured Bearer token; health
-reports coordinator subscription state. Artifact downloads and coordinator
-subscriptions require trusted TLS peers; there is no insecure fallback.
-
-## Metrics and compatibility
-
-Use a result-file parser returning `agent.ShibuyaMetric`, or an adapter-normalized
-native endpoint explicitly declaring `agent.MetricsSchemaShibuyaV1`. An arbitrary
-Prometheus endpoint is not automatically reporting-compatible. The
-[metrics contract](agent/metrics.md) defines required families, units, labels,
-buckets, and aggregation behavior.
-
-Use `metricschema` when constructing compatible producers or reporting queries.
-Its label-list functions return caller-owned slices; they do not expose collector
-state. Prometheus collectors remain private to `agent`, while query execution and
-reporting policy stay in the control plane.
-
-The Go API release `v0.1.1`, metrics profile `shibuya-v1`, and wire behavior are
-separate contracts. The existing wire envelope and subscription are unversioned;
-there is no protocol negotiation or unsupported-version rejection. This release
-does not introduce third-party engine registration or a reference k6/Gatling
-integration. Pre-1.0 Go API changes may be incompatible and must be reviewed when
-upgrading a pinned module version.
-
-## Verification
-
-```sh
-GOWORK=off go test -race -count=1 ./...
-GOWORK=off go list -deps -test -json ./...
-GOWORK=off go list -m -json all
-```
+## License
 
 Licensed under [Apache-2.0](LICENSE). [NOTICE](NOTICE) records extraction provenance;
-dependency licenses and notices are retained in `THIRD_PARTY_NOTICES`.
+dependency licenses and notices are retained in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
