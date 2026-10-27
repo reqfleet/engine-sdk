@@ -333,12 +333,15 @@ It uses the Go release strategy in
 [`release-please-config.json`](release-please-config.json) for the root module
 only. Examples are not separate release components.
 
-Before enabling the workflow, add the repository Actions secret
-`RELEASE_PLEASE_TOKEN`: a fine-grained personal access token with access to this
-repository and read/write permissions for Contents, Issues, and Pull requests.
-Obtain any required organization approval. The dedicated token lets generated
-release PRs trigger the existing `pr-test` workflow; the default `GITHUB_TOKEN`
-does not trigger workflows from its PR or tag events. See the
+The workflow uses the built-in `GITHUB_TOKEN`; no additional secret is needed.
+Under repository Settings > Actions > General > Workflow permissions, enable
+"Allow GitHub Actions to create and approve pull requests". The workflow grants
+the token Contents, Issues, and Pull requests write permissions.
+
+PR and tag events created by `GITHUB_TOKEN` do not trigger other workflows.
+To run `pr-test`, close and reopen the generated release PR using your own
+account. Repeat this after Release Please pushes updates, so checks cover the
+latest commit. See the
 [action's credentials documentation](https://github.com/googleapis/release-please-action#github-credentials).
 
 Use Conventional Commit messages on `main`, including squash-merge titles.
