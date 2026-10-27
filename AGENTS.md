@@ -53,6 +53,8 @@ adapter is supplied here.
 | [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go) | Authenticated endpoints, native metrics proxy, result-event ingestion and collectors |
 | [`protocol`](protocol) | Coordinator messages, explicit run/artifact assignments, lifecycle states, errors, and artifact paths |
 | [`metricschema`](metricschema) | Collector-free metric names, reserved request labels, and ordered label definitions |
+| [`validation`](validation/doc.go) | Synchronous upload-validation contract, structured diagnostics, and result checks; not part of agent execution |
+| [`examples/jsonvalidator`](examples/jsonvalidator) | Working JSON request-plan validator using only standard-library and public SDK dependencies |
 | [`internal`](internal) | SDK-only artifact transport, subscriptions, and container resource collection |
 
 ## Development environment

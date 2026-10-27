@@ -78,6 +78,58 @@ root-level `go test ./...` does not run its harness. The
 requests, covering both SDK race tests and the Docker conformance harness.
 See the example README for prerequisites and standalone commands.
 
+## Upload validation
+
+The [`validation`](validation/doc.go) package defines a public Go contract for
+upload-time artifact validation, separate from the agent runtime. This package
+and the [`jsonvalidator`](examples/jsonvalidator) example are unreleased;
+`v0.1.1` does not contain them. They require the next SDK release containing this
+contract.
+
+Implement `validation.Validator` with the signature
+`func(context.Context, validation.Artifact) (validation.Result, error)`.
+The hosting API compiles and trusts the callback and invokes it synchronously;
+adding an adapter requires rebuilding that API. This is not an independently
+installed plugin, process runner, sandbox, or new wire protocol. The Go contract
+is versioned with the SDK release.
+
+Validators must parse or compile only, never execute uploaded tests, and must
+honor context cancellation where possible. Go cancellation is cooperative, not
+forced termination or an independent memory quota. `Artifact.Content` remains
+caller-owned and must not be mutated or retained after the callback returns.
+
+| Status | Contract |
+| --- | --- |
+| `valid` | No diagnostics. |
+| `invalid` | At least one diagnostic, each with nonempty `code` and `message`. |
+| `unsupported` | Validation is unavailable; optional diagnostics explain why. Not success. |
+
+Call `Result.Check()` to reject empty/unknown statuses, malformed diagnostics,
+and negative coordinates. Nonzero `line` and `column` values are one-based; zero
+means unspecified. Diagnostics retain their order. A Go error denotes an
+operational failure or cancellation, never an invalid artifact.
+
+Validation does not grant upload admission or execution capability and does not
+report label counts, cardinality safety, or transformed content. Registration,
+format/capability discovery, upload safeguards, preparation, and tier policy
+belong to the host. Skipped validation must not be represented as `valid`.
+
+The real [`jsonvalidator.Validate`](examples/jsonvalidator/validation.go) example
+accepts:
+
+```json
+{"requests":[{"method":"GET","url":"https://example.com"}]}
+```
+
+It rejects malformed/trailing JSON with `syntax` diagnostics and unknown fields,
+invalid field types, empty request arrays/methods, and URLs without an HTTP(S)
+scheme and host with `configuration` diagnostics. It never sends requests and
+uses only standard-library and public SDK dependencies.
+
+Run `make test-validation` for the contract and JSON validator example tests with
+race detection, without Docker. These tests also run through `make test-sdk` and
+the full `make test` target.
+
 ## License
 
 Licensed under [Apache-2.0](LICENSE). [NOTICE](NOTICE) records extraction provenance;
