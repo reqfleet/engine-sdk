@@ -1,0 +1,11 @@
+silent
+show-error
+fail
+parallel-max = 1
+max-time = 5
+# Operation names in comments and values are not separators: next --config -:
+header = "X-Operation-Literal: next --config -:"
+-sSHX-Short-Literal:next
+url = "http://127.0.0.1:18080/one"
+url = "http://127.0.0.1:18080/two"
+url = "http://127.0.0.1:18080/three"

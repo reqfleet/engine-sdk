@@ -65,6 +65,19 @@ For adapter development, start with [AGENTS.md](AGENTS.md). It covers the public
 packages, callback lifecycle, configuration, workspace ownership, metrics
 integration, and verification workflow, with links to the detailed contracts.
 
+## Examples
+
+[Preparing adapter](examples/preparing-adapter/README.md) translates assigned
+settings into a run-local curl configuration through `BeforeStart`, then lets
+the SDK launch and supervise curl. Its Docker conformance harness exercises real
+requests, duplicate starts, startup failure, cancellation, and recovery.
+
+The example is an independent module pinned to a released SDK version, so
+root-level `go test ./...` does not run its harness. The
+[`pr-test` workflow](.github/workflows/pr-test.yml) runs `make test` on pull
+requests, covering both SDK race tests and the Docker conformance harness.
+See the example README for prerequisites and standalone commands.
+
 ## License
 
 Licensed under [Apache-2.0](LICENSE). [NOTICE](NOTICE) records extraction provenance;
