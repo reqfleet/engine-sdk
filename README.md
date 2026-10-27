@@ -126,6 +126,10 @@ invalid field types, empty request arrays/methods, and URLs without an HTTP(S)
 scheme and host with `configuration` diagnostics. It never sends requests and
 uses only standard-library and public SDK dependencies.
 
+Run `make test-validation` for the contract and JSON validator example tests with
+race detection, without Docker. These tests also run through `make test-sdk` and
+the full `make test` target.
+
 ## License
 
 Licensed under [Apache-2.0](LICENSE). [NOTICE](NOTICE) records extraction provenance;
