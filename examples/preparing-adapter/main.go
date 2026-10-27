@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -125,7 +127,7 @@ func beforeStart(ctx context.Context, run agent.RunContext) (resultErr error) {
 			resultErr = errors.Join(resultErr, fmt.Errorf("remove incomplete config %q: %w", cleanupPath, err))
 		}
 	}()
-	_, copyErr := io.Copy(output, contextReader{ctx: ctx, reader: source})
+	copyErr := copySingleOperationConfig(ctx, output, source)
 	if err := errors.Join(copyErr, source.Close()); err != nil {
 		return fmt.Errorf("copy original %q: %w", run.TestFile, err)
 	}
@@ -151,6 +153,66 @@ func beforeStart(ctx context.Context, run agent.RunContext) (resultErr error) {
 	}
 	published = true
 	return ctx.Err()
+}
+
+func copySingleOperationConfig(ctx context.Context, output io.Writer, source io.Reader) error {
+	// Tee the input so validation never normalizes whitespace or line endings.
+	scanner := bufio.NewScanner(io.TeeReader(contextReader{ctx: ctx, reader: source}, output))
+	// Match the 100 KiB config-line limit of curl in the Debian runtime image.
+	scanner.Buffer(make([]byte, 4096), 100*1024)
+	for line := 1; scanner.Scan(); line++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := checkCurlOption(scanner.Bytes()); err != nil {
+			return fmt.Errorf("line %d: %w", line, err)
+		}
+	}
+	return scanner.Err()
+}
+
+func checkCurlOption(line []byte) error {
+	if bytes.IndexByte(line, 0) >= 0 {
+		return errors.New("curl config must not contain NUL bytes")
+	}
+	line = bytes.TrimLeft(line, " \t\r\v\f")
+	if len(line) == 0 || line[0] == '#' || line[0] == '/' || line[0] == '*' {
+		return nil
+	}
+	short := line[0] == '-' && !bytes.HasPrefix(line, []byte("--"))
+	separators := " \t\r\v\f=:"
+	if short {
+		separators = " \t\r\v\f"
+	}
+	if end := bytes.IndexAny(line, separators); end >= 0 {
+		line = line[:end]
+	}
+	if short {
+		for _, option := range line[1:] {
+			switch option {
+			case ':':
+				return errors.New("curl operation separators (next) are not supported")
+			case 'K':
+				return errors.New("curl config includes are not supported")
+			}
+			// Only argument-free short options can precede another option.
+			// Stop before attached values such as -HX-Name:next.
+			if !strings.ContainsRune("012346aBfgGhiIjJklLMnNOpqRsSvVZ#", rune(option)) {
+				break
+			}
+		}
+		return nil
+	}
+	option := bytes.TrimPrefix(line, []byte("--"))
+	// curl also accepts case-insensitive, unambiguous long-option prefixes.
+	if bytes.EqualFold(option, []byte("next")) || bytes.EqualFold(option, []byte("nex")) {
+		return errors.New("curl operation separators (next) are not supported")
+	}
+	if bytes.EqualFold(option, []byte("config")) || bytes.EqualFold(option, []byte("confi")) ||
+		bytes.EqualFold(option, []byte("conf")) {
+		return errors.New("curl config includes are not supported")
+	}
+	return nil
 }
 
 type contextReader struct {
@@ -182,6 +244,6 @@ func buildCommand(ctx context.Context, run agent.RunContext) (agent.Command, err
 	}
 	return agent.Command{
 		Command: "curl",
-		Args:    []string{"--config", preparedConfigPath(run)},
+		Args:    []string{"--disable", "--config", preparedConfigPath(run)},
 	}, nil
 }

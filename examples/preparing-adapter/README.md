@@ -25,8 +25,17 @@ Unknown fields are ignored, including `rampup`: curl has no ramp-up mapping in
 this example. Assignments are already per-agent counts; the adapter does not
 allocate or divide them.
 
-The hook streams the original bytes unchanged into an exclusively created
-sibling temporary file in `Workspace.Temp`. It appends a separating newline and:
+Only one curl operation is supported. Preparation rejects `next`, `--next`,
+`-:`, their accepted abbreviations and bundled short-option forms. It also
+rejects `config`/`--config`/`-K` includes, which could hide further operations.
+Operation names inside comments or option values are allowed. Automatic
+`.curlrc` loading is disabled so ambient configuration cannot add operations.
+The artifact must contain no NUL bytes, and each line must be shorter than
+curl's 100 KiB config-line limit in the supplied Debian image.
+
+The hook validates while streaming the original bytes unchanged into an
+exclusively created sibling temporary file in `Workspace.Temp`. It appends a
+separating newline and:
 
 ```text
 parallel
@@ -48,12 +57,12 @@ then verifies that every admitted request ends and no queued work leaks into
 the recovery run.
 
 Preparation checks cancellation before work, during the streaming copy, and
-before/after publication. Copy, write, close, and rename failures propagate as
-startup errors. The file is closed before atomic rename to
+before/after publication. Validation, copy, write, close, and rename failures
+propagate as startup errors. The file is closed before atomic rename to
 `Workspace.Temp/prepared.curl`; failed/canceled preparation removes its generated
 output. The original `run.TestFile` is never rewritten. `buildCommand` returns
-`curl --config <prepared path>`; the SDK owns launching, stopping, and reaping
-curl, rather than the hook starting a subprocess itself.
+`curl --disable --config <prepared path>`; the SDK owns launching, stopping,
+and reaping curl, rather than the hook starting a subprocess itself.
 
 Inputs, temporary files, and results are reset at the next run initialization.
 A completed run's generated file remains available until that reset; it is not
@@ -101,10 +110,10 @@ runs the same `make test` target on pull requests.
 Run the integration test only in the disposable container: it uses root to bind
 its ephemeral-CA HTTPS artifact server to `127.0.0.1:443`, a TLS command peer on
 `:2416`, the SDK HTTP server on `:8080`, and an actual HTTP workload target on
-`:18080`. Do not publish ports or mount host directories. The image builds the
-adapter and integration-tagged test binary with Go 1.26.9 and `CGO_ENABLED=0`,
-then installs curl and CA certificates in a Debian runtime. Its exact entrypoint
-is:
+`:18080`. Do not publish ports or mount host directories. The image runs the
+preparation unit tests, then builds the adapter and integration-tagged test
+binary with Go 1.26.9 and `CGO_ENABLED=0`. It installs curl and CA certificates
+in a Debian runtime. Its exact entrypoint is:
 
 ```sh
 /usr/local/bin/conformance.test -test.run='^TestPublicAdapterRuntime$' \
@@ -121,7 +130,10 @@ mock or replace SDK lifecycle methods.
 The same child covers a successful three-URL run with concurrency `13`, duplicate
 start suppression, a second run with changed name/concurrency `3`, invalid
 settings, cancellation while artifact download is blocked, cancellation while
-curl is in flight, and recovery. Assertions compare immutable source bytes,
-generated assignments, request names/counts, and terminal SDK statuses. The
-five-component engine name and offset `7` select the assignment at `runs["7"]`;
-no engine-specific coordinator transformation is needed.
+curl is in flight, rejection of multiple operations before any workload launch,
+and recovery. It also checks that operation names in native header values are
+preserved and an ambient `.curlrc` cannot add requests. Rejected preparation
+leaves the original artifact unchanged and no temporary or published config.
+Assertions compare generated assignments, request names/counts, and terminal
+SDK statuses. The five-component engine name and offset `7` select the
+assignment at `runs["7"]`; no engine-specific coordinator transformation is needed.

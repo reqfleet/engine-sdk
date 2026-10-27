@@ -63,6 +63,8 @@ func TestPublicAdapterRuntime(t *testing.T) {
 	inflightEnded := make(chan struct{}, 3)
 	target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.record(r.URL.Path, r.Header.Get("X-Plan-Name"))
+		assert.Equal(t, "next --config -:", r.Header.Get("X-Operation-Literal"))
+		assert.Equal(t, "next", r.Header.Get("X-Short-Literal"))
 		if r.Header.Get("X-Plan-Name") == "inflight-proof" {
 			// Finish protocol negotiation while leaving the response body in flight.
 			w.WriteHeader(http.StatusOK)
@@ -85,6 +87,8 @@ func TestPublicAdapterRuntime(t *testing.T) {
 
 	originalPath := proofArtifactPath(t, "original.curl")
 	blockedPath := proofArtifactPath(t, "blocked.curl")
+	multiplePath := proofArtifactPath(t, "multiple.curl")
+	multipleConfig := append(bytes.Clone(originalConfig), []byte("next\nurl = \"http://127.0.0.1:18080/one\"\n")...)
 	downloadStarted := make(chan struct{}, 1)
 	downloadEnded := make(chan struct{}, 1)
 	var artifactMu sync.Mutex
@@ -102,6 +106,9 @@ func TestPublicAdapterRuntime(t *testing.T) {
 		case originalPath:
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = w.Write(originalConfig)
+		case multiplePath:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(multipleConfig)
 		case blockedPath:
 			select {
 			case downloadStarted <- struct{}{}:
@@ -125,6 +132,9 @@ func TestPublicAdapterRuntime(t *testing.T) {
 	}
 
 	root := t.TempDir()
+	// An ambient config must not introduce operations outside the staged plan.
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".curlrc"),
+		[]byte("url = \"http://127.0.0.1:18080/unassigned\"\nnext\n"), 0600))
 	client := &http.Client{Timeout: time.Second}
 	t.Cleanup(client.CloseIdleConnections)
 	var logs proofLog
@@ -317,19 +327,33 @@ func TestPublicAdapterRuntime(t *testing.T) {
 	noRequests(len(canceledRequests))
 	t.Logf("running curl canceled; all %d admitted target request contexts ended", len(canceledRequests)-6)
 
+	start("1007", "multiple-operations-proof", "3", "multiple.curl")
+	status = waitTerminal("1007", protocol.RunFailed)
+	require.Equal(t, protocol.FailureStartup, status.FailurePhase)
+	require.Equal(t, protocol.StartupStateFailed, status.StartupStatus)
+	require.Equal(t, -1, status.ExitCode)
+	source, err = os.ReadFile("/test-data/original.curl")
+	require.NoError(t, err)
+	require.Equal(t, multipleConfig, source, "rejected source must remain unchanged")
+	preparedFiles, err := os.ReadDir(filepath.Dir(generatedPath))
+	require.NoError(t, err)
+	require.Empty(t, preparedFiles, "rejected preparation must leave no published or temporary config")
+	noRequests(len(canceledRequests))
+	t.Log("multiple curl operations rejected before any workload or generated config")
+
 	start("1006", "recovery-proof", "3", "original.curl")
 	waitTerminal("1006", protocol.RunCompleted)
 	recoveryGenerated := checkPrepared("1006", "recovery-proof", 3)
 	require.NotContains(t, string(recoveryGenerated), "inflight-proof")
 	checkRequests(len(canceledRequests), "recovery-proof")
 	noRequests(len(canceledRequests) + 3)
-	require.Equal(t, 6, artifactCount(), "one original artifact fetch for each admitted run")
+	require.Equal(t, 7, artifactCount(), "one original artifact fetch for each admitted run")
 	select {
 	case <-childDone:
 		t.Fatalf("adapter exited before recovery completed: %v\n%s", childErr, logs.String())
 	default:
 	}
-	t.Logf("same adapter child PID=%d recovered; six runs, six authenticated artifact requests, %d target requests", child.Process.Pid, len(requests.snapshot()))
+	t.Logf("same adapter child PID=%d recovered; seven runs, seven authenticated artifact requests, %d target requests", child.Process.Pid, len(requests.snapshot()))
 }
 
 func proofPayload(verb, runID, filename string, settings json.RawMessage) protocol.Payload {

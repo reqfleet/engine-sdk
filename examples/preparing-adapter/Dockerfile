@@ -4,7 +4,8 @@ ENV CGO_ENABLED=0 GOWORK=off
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o /usr/local/bin/preparing-adapter . \
+RUN go test -count=1 ./... \
+    && go build -o /usr/local/bin/preparing-adapter . \
     && go test -tags=integration -c -o /usr/local/bin/conformance.test .
 
 FROM debian:bookworm-slim
