@@ -324,3 +324,37 @@ existing wire envelope and subscription are unversioned: there is no protocol
 negotiation or unsupported-version rejection. Review pre-1.0 API changes when
 upgrading a pinned dependency; do not imply that a module version negotiates
 coordinator compatibility.
+
+## Releasing the SDK
+
+The [`release-please` workflow](.github/workflows/release-please.yml) runs on
+pushes to `main`; it can also be dispatched manually with `main` selected.
+It uses the Go release strategy in
+[`release-please-config.json`](release-please-config.json) for the root module
+only. Examples are not separate release components.
+
+Before enabling the workflow, add the repository Actions secret
+`RELEASE_PLEASE_TOKEN`: a fine-grained personal access token with access to this
+repository and read/write permissions for Contents, Issues, and Pull requests.
+Obtain any required organization approval. The dedicated token lets generated
+release PRs trigger the existing `pr-test` workflow; the default `GITHUB_TOKEN`
+does not trigger workflows from its PR or tag events. See the
+[action's credentials documentation](https://github.com/googleapis/release-please-action#github-credentials).
+
+Use Conventional Commit messages on `main`, including squash-merge titles.
+`fix:` produces a patch release; `feat:` produces a minor release. While the SDK
+is pre-1.0, breaking changes (`!` or a `BREAKING CHANGE:` footer) also bump the
+minor version. Documentation and chore commits alone do not trigger releases.
+
+Release Please opens or updates a release PR containing `CHANGELOG.md` and the
+version manifest. Review the changelog and wait for `pr-test` to pass before
+merging. The subsequent push to `main` publishes the GitHub release and its
+Go-compatible `vX.Y.Z` tag, without a component prefix.
+
+The [manifest](.release-please-manifest.json) records the **last released**
+version, not the next target. It is initialized to the existing `0.1.1` release;
+the unreleased validation feature makes the first automated release `0.2.0`.
+Release Please advances the manifest in its release PR. Do not pre-seed it with
+`0.2.0` or leave a permanent `release-as` override: subsequent versions should
+continue to follow Conventional Commits.
+
