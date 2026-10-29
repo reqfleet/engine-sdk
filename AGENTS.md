@@ -47,9 +47,10 @@ adapter is supplied here.
 
 | Package / source | Responsibility |
 | --- | --- |
-| [`agent/server.go`](agent/server.go) | `AgentServerOptions`, constructors, runtime startup, deployment configuration, metrics admission |
+| [`agent/server.go`](agent/server.go) | `AgentServerOptions`, constructors, deployment configuration, metrics admission |
 | [`agent/run.go`](agent/run.go), [`agent/command.go`](agent/command.go) | `RunContext`, `Workspace`, `Process`, and the command returned by an adapter |
-| [`agent/lifecycle.go`](agent/lifecycle.go) | SDK-owned preparation, process supervision, observations, cancellation, and cleanup |
+| [`agent/lifecycle.go`](agent/lifecycle.go) | SDK-owned preparation, lifecycle state, observations, and cancellation |
+| [`agent/runtime_unix.go`](agent/runtime_unix.go), [`agent/runtime_unsupported.go`](agent/runtime_unsupported.go) | Unix runtime startup, process supervision and cleanup; explicit execution rejection on non-Unix systems |
 | [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go) | Authenticated endpoints, native metrics proxy, result-event ingestion and collectors |
 | [`protocol`](protocol) | Coordinator messages, explicit run/artifact assignments, lifecycle states, errors, and artifact paths |
 | [`metricschema`](metricschema) | Collector-free metric names, reserved request labels, and ordered label definitions |

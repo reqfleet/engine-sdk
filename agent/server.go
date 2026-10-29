@@ -427,40 +427,6 @@ func (as *AgentServer) isSubscribed() bool {
 	return as.coordinatorSubscribed
 }
 
-func (as *AgentServer) Run() error {
-	if err := as.validateMetricsOptions(); err != nil {
-		return err
-	}
-	options := as.options
-	if options.BuildCommand == nil {
-		return fmt.Errorf("engine command builder is not configured")
-	}
-	if options.EngineMeta.CoordinatorIP == "" {
-		return fmt.Errorf("coordinator endpoint is not configured")
-	}
-	go func() {
-		if err := as.reportOwnMetrics(5 * time.Second); err != nil {
-			options.Logger.Fatal(err)
-		}
-	}()
-	go as.runRequestWorker(context.Background())
-	go func() {
-		for {
-			time.Sleep(2 * time.Second)
-			msgChan, err := as.SubscribeToCoordinator()
-			if err != nil {
-				options.Logger.Error(err)
-				as.updateSubStatus(false)
-				continue
-			}
-			as.updateSubStatus(true)
-			as.listenToCoordinator(msgChan)
-		}
-	}()
-	go as.handleMetricStream()
-	return as.startHTTPServer()
-}
-
 func (as *AgentServer) validateMetricsOptions() error {
 	options := as.options
 	if options.MetricsURL == "" {

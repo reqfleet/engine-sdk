@@ -65,6 +65,23 @@ For adapter development, start with [AGENTS.md](AGENTS.md). It covers the public
 packages, callback lifecycle, configuration, workspace ownership, metrics
 integration, and verification workflow, with links to the detailed contracts.
 
+## Platform support
+
+Deployed agents require Linux containers, including writable workspace paths and
+cgroup CPU/memory files. Unix workload execution uses process groups so stopping
+a run also terminates its descendants.
+
+This checkout also supports Windows `amd64` and `arm64` builds for clients that
+import SDK types and handlers. It does not support Windows agent execution:
+`AgentServer.Run()` returns an error matching `errors.ErrUnsupported` before
+starting workers, coordinator subscriptions, or HTTP listeners. The Windows
+compatibility fix is unreleased; consumers pinned to `v0.1.1` need a release
+containing this fix.
+
+The PR workflow builds both Windows architectures and runs the unsupported
+execution contract tests on a Windows runner. Linux retains the full SDK race
+test suite and adapter conformance checks.
+
 ## Examples
 
 [Preparing adapter](examples/preparing-adapter/README.md) translates assigned

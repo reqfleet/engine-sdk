@@ -1,6 +1,14 @@
 // Derived from reqfleet/shibuya; modified for engine-sdk.
 // Package agent runs coordinator-dependent engine adapters.
 //
+// # Platform support
+//
+// Deployed agents require Linux containers and cgroup resource metrics. Windows
+// clients may import SDK types and use Handler without starting an agent.
+// On non-Unix systems, AgentServer.Run returns an error matching
+// errors.ErrUnsupported before starting workers, subscriptions, or HTTP services.
+// Workload execution requires Unix process-group supervision.
+//
 // # Coordinator authority
 //
 // An agent is not a standalone runner. The coordinator authorizes preparation,

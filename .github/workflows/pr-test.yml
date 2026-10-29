@@ -17,3 +17,25 @@ jobs:
           go-version-file: go.mod
       - name: Run SDK and adapter conformance tests
         run: make test
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      GOWORK: "off"
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Verify unsupported execution contract
+        run: go test -count=1 ./agent -run '^TestUnsupportedPlatform'
+      - name: Build Windows AMD64 packages
+        env:
+          GOARCH: amd64
+        run: go build ./...
+      - name: Build Windows ARM64 packages
+        env:
+          GOARCH: arm64
+        run: go build ./...
