@@ -1,3 +1,5 @@
+//go:build unix
+
 // Derived from reqfleet/shibuya; modified for engine-sdk.
 package agent
 
