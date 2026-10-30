@@ -1,6 +1,7 @@
-// Package validation defines the public Go contract for upload-time artifact
-// validation. The API is versioned with engine-sdk releases; it is not a new wire
-// protocol. JSON tags describe result fields, not an invocation transport.
+// Package validation defines the public Go contract for optional, best-effort
+// upload checks. Validation and label counting provide early user feedback, not
+// runtime-safety capabilities. The API is versioned with engine-sdk releases;
+// JSON tags describe data fields, not a new invocation transport.
 //
 // The hosting API compiles and trusts validators. They run synchronously in its
 // process, without a sandbox, independent memory quota, or forced Go-parser
@@ -9,40 +10,48 @@
 // honor context cancellation where possible. Artifact.Content remains owned by
 // the caller and must not be mutated or retained by a validator.
 //
-// Valid has no diagnostics. Invalid requires at least one diagnostic with a
-// nonempty code and message. Unsupported indicates that validation is unavailable
-// for the artifact; it is distinct from success and may explain the limitation
-// in diagnostics. Diagnostic coordinates are one-based when nonzero; zero means
-// unspecified. Result.Check rejects unknown or empty statuses, malformed
-// diagnostics, negative coordinates, and malformed analysis. Diagnostic ordering
-// is preserved. A Go error represents an operational failure or cancellation,
-// including an analyzer failure, not rejection of an invalid artifact. Do not
-// downgrade operational failures to unsupported or dynamic analysis. Callers must
-// check both the error and the result contract.
+// A Validator accepts a context, Artifact, and Options. Options independently
+// suppress checks: SkipPlanFileValidation skips validation without disabling
+// counting; SkipLabelCounting skips counting without disabling validation.
+// Adapters must honor both flags, but an enabled check remains best-effort. An
+// adapter may return Skipped if it does not implement validation for the artifact,
+// or omit LabelCount if it cannot determine a count.
 //
-// A Validator can return Result.Analysis alongside validation in the same
-// invocation, reusing parsed content. The two outcomes remain distinct: successful
-// validation does not imply that an exact count is available. The callback takes
-// no tier or limit input and returns facts; the host applies admission policy.
-// Invalid and Unsupported validation results must not carry analysis.
+// Valid means validation succeeded. Skipped means validation was not performed,
+// whether disabled by Options or unavailable in the adapter. Neither status may
+// carry diagnostics; both may carry an optional LabelCount. Invalid requires at
+// least one diagnostic with a nonempty code and message, and must not carry a
+// count. Skipping validation must not be reported as Valid.
 //
-// LabelAnalysis counts engine-defined entities identified by Unit, for example
-// "tasks", "test labels", or "request labels". A Locust static task/decorator count
-// is not a count of emitted request labels. AnalysisExact requires a nonnegative
-// Count and a nonblank Unit; zero means an exact zero count. AnalysisDynamic means
-// the entities depend on execution, AnalysisUnsupported means the analyzer cannot
-// determine a count, and AnalysisNotApplicable means this analysis does not apply
-// to the engine's artifact. These non-exact states require Count to be zero, but
-// that value asserts no count; Unit is optional. Nil Analysis means unavailable or
-// not supplied, never an exact zero. JSON includes count even when it is zero;
-// consumers must interpret it together with status.
+// Diagnostic coordinates are one-based when nonzero; zero means unspecified.
+// Diagnostic ordering is preserved. Result.Check rejects unknown or empty
+// statuses, malformed diagnostics, negative coordinates, and malformed counts.
+// A zero Result is malformed. A Go error represents an actual operational failure
+// or cancellation, not rejection of an invalid artifact or an unavailable
+// best-effort count. Do not convert operational errors into successful or Skipped
+// results. Callers must check both the error and the result contract.
 //
-// A valid result or exact preflight count does not grant upload admission or
-// execution capability, prove runtime cardinality safety, or rewrite artifacts.
-// Runtime still enforces a distinct-label cap, including dynamically named labels.
-// Operator policy that skips validation must not be represented as Valid. Hosts
-// may check analysis separately with LabelAnalysis.Check when validation is
-// skipped; an empty validation status is not a public Validator outcome. Engine
-// registration, capability discovery, invocation, upload safeguards, tier policy,
-// and preparation of stored content belong to the host, not this package.
+// Result.LabelCount is optional. A supplied LabelCount requires a nonnegative
+// Count and a nonblank Unit; its Check method validates those fields. Nil means
+// no count was supplied, not zero, and never blocks an upload on counting grounds.
+// JSON omits a nil label_count but includes count when it is zero. There are no
+// count-completeness statuses.
+//
+// Unit identifies engine-defined entities, such as "tasks", "test labels", or
+// "request labels". Configured JMeter sampler labels and Locust static task
+// counts are preflight information, not emitted request-label cardinality. The
+// callback takes no tier or label-limit input; the host may compare a supplied
+// count with its upload policy.
+//
+// These checks do not grant execution capability, prove runtime cardinality
+// safety, or rewrite artifacts. The SDK independently enforces its runtime
+// distinct-label cap, including dynamically named labels. Registration,
+// invocation, upload safeguards, mandatory content preparation, and tier policy
+// belong to the host, not this package.
+//
+// The public examples/jsonvalidator adapter demonstrates independent checks:
+// counting can run without semantic validation; malformed counting-only input
+// and dynamicLabels:true omit the count. Skipping counting preserves validation
+// diagnostics, and skipping both checks avoids parsing. Cancellation remains an
+// operational error under every option combination.
 package validation

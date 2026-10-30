@@ -29,24 +29,33 @@ type request struct {
 
 // Validate accepts a JSON object containing a nonempty requests array, for
 // example {"requests":[{"method":"GET","url":"https://example.com","label":"home"}]}.
-// Unknown fields, trailing JSON, empty methods, and URLs without an HTTP(S)
-// scheme and host are rejected. It never sends requests.
-// Static analysis counts distinct labels; an omitted or empty label defaults to
-// method + " " + URL. Top-level "dynamicLabels":true declares runtime-generated
-// names and returns dynamic analysis instead of claiming an exact static count.
-func Validate(ctx context.Context, artifact validation.Artifact) (validation.Result, error) {
+// When validation is enabled, unknown fields, trailing JSON, empty methods, and
+// URLs without an HTTP(S) scheme and host are rejected. It never sends requests.
+// Counting is independent of semantic validation and counts distinct labels; an
+// omitted or empty label defaults to method + " " + URL. Dynamic labels or input
+// that cannot be parsed for counting produce no count.
+func Validate(ctx context.Context, artifact validation.Artifact, options validation.Options) (validation.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return validation.Result{}, err
 	}
+	result := validation.Result{Status: validation.Skipped}
+	if options.SkipPlanFileValidation && options.SkipLabelCounting {
+		return result, nil
+	}
 
 	decoder := json.NewDecoder(bytes.NewReader(artifact.Content))
-	decoder.DisallowUnknownFields()
+	if !options.SkipPlanFileValidation {
+		decoder.DisallowUnknownFields()
+	}
 	var cfg config
 	err := decoder.Decode(&cfg)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return validation.Result{}, ctxErr
 	}
 	if err != nil {
+		if options.SkipPlanFileValidation {
+			return result, nil
+		}
 		code := "configuration"
 		var syntaxError *json.SyntaxError
 		if errors.As(err, &syntaxError) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
@@ -62,42 +71,43 @@ func Validate(ctx context.Context, artifact validation.Artifact) (validation.Res
 		return validation.Result{}, ctxErr
 	}
 	if err != io.EOF {
+		if options.SkipPlanFileValidation {
+			return result, nil
+		}
 		return invalid("syntax", "expected exactly one JSON object; unexpected trailing input"), nil
 	}
-	if len(cfg.Requests) == 0 {
-		return invalid("configuration", "requests must contain at least one request"), nil
-	}
-
-	var diagnostics []validation.Diagnostic
-	for i, request := range cfg.Requests {
+	if !options.SkipPlanFileValidation {
+		if len(cfg.Requests) == 0 {
+			return invalid("configuration", "requests must contain at least one request"), nil
+		}
+		var diagnostics []validation.Diagnostic
+		for i, request := range cfg.Requests {
+			if err := ctx.Err(); err != nil {
+				return validation.Result{}, err
+			}
+			if strings.TrimSpace(request.Method) == "" {
+				diagnostics = append(diagnostics, validation.Diagnostic{
+					Code:    "configuration",
+					Message: fmt.Sprintf("requests[%d].method must not be empty", i),
+				})
+			}
+			parsedURL, err := url.Parse(request.URL)
+			if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Hostname() == "" {
+				diagnostics = append(diagnostics, validation.Diagnostic{
+					Code:    "configuration",
+					Message: fmt.Sprintf("requests[%d].url must have an HTTP(S) scheme and host", i),
+				})
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return validation.Result{}, err
 		}
-		if strings.TrimSpace(request.Method) == "" {
-			diagnostics = append(diagnostics, validation.Diagnostic{
-				Code:    "configuration",
-				Message: fmt.Sprintf("requests[%d].method must not be empty", i),
-			})
+		if len(diagnostics) != 0 {
+			return validation.Result{Status: validation.Invalid, Diagnostics: diagnostics}, nil
 		}
-		parsedURL, err := url.Parse(request.URL)
-		if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Hostname() == "" {
-			diagnostics = append(diagnostics, validation.Diagnostic{
-				Code:    "configuration",
-				Message: fmt.Sprintf("requests[%d].url must have an HTTP(S) scheme and host", i),
-			})
-		}
+		result.Status = validation.Valid
 	}
-	if err := ctx.Err(); err != nil {
-		return validation.Result{}, err
-	}
-	if len(diagnostics) != 0 {
-		return validation.Result{Status: validation.Invalid, Diagnostics: diagnostics}, nil
-	}
-	analysis := &validation.LabelAnalysis{
-		Status: validation.AnalysisDynamic,
-		Unit:   "request labels",
-	}
-	if !cfg.DynamicLabels {
+	if !options.SkipLabelCounting && !cfg.DynamicLabels {
 		labels := make(map[string]struct{}, len(cfg.Requests))
 		for _, request := range cfg.Requests {
 			if err := ctx.Err(); err != nil {
@@ -109,10 +119,12 @@ func Validate(ctx context.Context, artifact validation.Artifact) (validation.Res
 			}
 			labels[label] = struct{}{}
 		}
-		analysis.Status = validation.AnalysisExact
-		analysis.Count = len(labels)
+		result.LabelCount = &validation.LabelCount{Count: len(labels), Unit: "request labels"}
 	}
-	return validation.Result{Status: validation.Valid, Analysis: analysis}, nil
+	if err := ctx.Err(); err != nil {
+		return validation.Result{}, err
+	}
+	return result, nil
 }
 
 func invalid(code, message string) validation.Result {

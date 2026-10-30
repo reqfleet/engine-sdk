@@ -118,8 +118,8 @@ at most N named request labels plus one overflow label per agent/run**. Zero
 permits only the overflow label; negative budgets are invalid configuration.
 This is not a global plan-wide budget across agents. It does not cap producer
 memory, source-side series, metric-family names, statuses, or other Prometheus
-dimensions. A successful exact preflight count describes the analyzed artifact,
-not a guarantee of the labels that runtime code will emit.
+dimensions. Optional preflight counts provide early feedback only; they do not
+predict or bound the labels that runtime code will emit.
 
 Result-file ingestion admits names in event order and folds excess names into
 `others`. Native ingestion sorts newly encountered names within each successful

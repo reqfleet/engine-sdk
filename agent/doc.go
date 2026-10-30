@@ -88,7 +88,7 @@
 // completion for final scrapes and resets on the next successful workload launch;
 // the final scrape still needs a reachable producer. This bounds exported request
 // labels, not producer memory, other metric dimensions, or plan-wide labels across
-// agents. Exact preflight analysis does not guarantee runtime label cardinality.
+// agents. Optional preflight counts do not guarantee runtime label cardinality.
 //
 // [metrics contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md
 package agent

@@ -98,13 +98,16 @@ See the example README for prerequisites and standalone commands.
 ## Upload validation
 
 The [`validation`](validation/doc.go) package defines a public Go contract for
-upload-time artifact validation, separate from the agent runtime. This package
-and the [`jsonvalidator`](examples/jsonvalidator) example are unreleased;
-`v0.1.1` does not contain them. They require the next SDK release containing this
-contract.
+optional, best-effort upload checks, separate from the agent runtime. Validation
+and label counting provide early user feedback; neither is a runtime-safety
+capability.
 
-Implement `validation.Validator` with the signature
-`func(context.Context, validation.Artifact) (validation.Result, error)`.
+Implement `validation.Validator` with the signature:
+
+```go
+func(context.Context, validation.Artifact, validation.Options) (validation.Result, error)
+```
+
 The hosting API compiles and trusts the callback and invokes it synchronously;
 adding an adapter requires rebuilding that API. This is not an independently
 installed plugin, process runner, sandbox, or new wire protocol. The Go contract
@@ -115,53 +118,47 @@ honor context cancellation where possible. Go cancellation is cooperative, not
 forced termination or an independent memory quota. `Artifact.Content` remains
 caller-owned and must not be mutated or retained after the callback returns.
 
+`validation.Options` has two independent flags:
+
+| Field | JSON name | Effect when true |
+| --- | --- | --- |
+| `SkipPlanFileValidation` | `skip_plan_file_validation` | Skip artifact validation; counting may still run. |
+| `SkipLabelCounting` | `skip_label_counting` | Skip counting; artifact validation may still run. |
+
+Both flags default to false. Adapters must honor each flag independently.
+An enabled check is still best-effort: an adapter may return `Skipped` when it
+does not implement validation for the artifact, or omit a count it cannot
+determine. Skipping validation must not be reported as `Valid`.
+
 | Status | Contract |
 | --- | --- |
-| `valid` | No diagnostics. |
-| `invalid` | At least one diagnostic, each with nonempty `code` and `message`. |
-| `unsupported` | Validation is unavailable; optional diagnostics explain why. Not success. |
+| `valid` | Validation succeeded. No diagnostics; optional label count. |
+| `invalid` | At least one diagnostic, each with nonempty `code` and `message`. No label count. |
+| `skipped` | Validation was not performed. No diagnostics; optional label count. |
 
 Call `Result.Check()` to reject empty/unknown statuses, malformed diagnostics,
-negative coordinates, and malformed analysis. Nonzero `line` and `column` values
+negative coordinates, and malformed counts. Nonzero `line` and `column` values
 are one-based; zero means unspecified. Diagnostics retain their order. A Go error
-denotes an operational failure or cancellation, including analyzer failures,
-never an invalid artifact. Return that error; do not downgrade it to an
-`unsupported` or `dynamic` analysis result.
+denotes an actual operational failure or cancellation, not an invalid artifact
+or an unavailable best-effort count. Return operational errors rather than
+pretending checks passed or converting them to `Skipped`.
 
-The same callback can return `Result.Analysis` alongside validation and reuse its
-parsed content. These are independent outcomes: `valid` does not imply an exact
-count is available. The public callback accepts no tier or label-limit input;
-adapters return facts and the hosting control plane compares exact counts to its
-tier policy. Invalid or unsupported **validation** results must not carry
-analysis; unsupported **analysis** can accompany valid syntax.
+`Result.LabelCount` is an optional `*validation.LabelCount` with integer `Count`
+and string `Unit` fields. A supplied count must be nonnegative and its unit
+nonblank. Nil means no count was supplied, not zero; JSON omits `label_count` in
+that case. A supplied zero count is serialized as `"count":0`. A nil count never
+blocks an upload on counting grounds. There are no count-completeness statuses.
 
-`Analysis` is an optional `*validation.LabelAnalysis` with `Status`, `Unit`, and
-integer `Count` fields:
-
-| Analysis status | Meaning |
-| --- | --- |
-| `exact` | An exact nonnegative count. `Count: 0` means exactly zero. A nonblank `Unit` is required. |
-| `dynamic` | Counted entities depend on execution; no exact static count is asserted. |
-| `unsupported` | The analyzer cannot determine the count. |
-| `not_applicable` | This analysis does not apply to the engine's artifact. |
-
-For every non-exact status, `Count` must be zero and `Unit` is optional. This zero
-does **not** assert zero entities. A nil `Analysis` means unavailable or not
-supplied, never exact zero. JSON omits nil analysis and includes `count` even when
-zero; consumers must inspect `status`, not treat the numeric field alone as proof.
 `Unit` identifies engine-defined entities, such as `"tasks"`, `"test labels"`, or
-`"request labels"`. In particular, Locust's static task/decorator count is not an
-emitted request-label cardinality.
+`"request labels"`. Configured JMeter sampler labels and Locust's static task
+counts are useful preflight information, not emitted request-label cardinality.
+The callback takes no tier or label-limit input; the host may compare a supplied
+count with its upload policy.
 
-Validation and analysis do not grant upload admission or execution capability,
-prove runtime cardinality safety, or transform content. Runtime still enforces
-its distinct-label cap, including dynamically named labels. Non-exact metadata
-does not itself authorize admission; the host requires an explicitly registered,
-verified runtime-bounded integration. Registration, format/capability discovery,
-upload safeguards, preparation, and tier policy belong to the host. Skipped
-validation must not be represented as `valid`; hosts can separately call
-`LabelAnalysis.Check()`, but an empty validation status is not a public callback
-outcome.
+These checks do not grant execution capability, prove runtime cardinality safety,
+or transform content. The SDK independently enforces its runtime distinct-label
+cap, including dynamically named labels. Registration, invocation, upload
+safeguards, mandatory content preparation, and tier policy belong to the host.
 
 The real [`jsonvalidator.Validate`](examples/jsonvalidator/validation.go) example
 accepts:
@@ -170,19 +167,28 @@ accepts:
 {"requests":[{"method":"GET","url":"https://example.com","label":"home"}]}
 ```
 
-It rejects malformed/trailing JSON with `syntax` diagnostics and unknown fields,
-invalid field types, empty request arrays/methods, and URLs without an HTTP(S)
-scheme and host with `configuration` diagnostics. It never sends requests and
-uses only standard-library and public SDK dependencies.
+With validation enabled, it rejects malformed/trailing JSON with `syntax`
+diagnostics and unknown fields, invalid field types, empty request arrays/methods,
+and URLs without an HTTP(S) scheme and host with `configuration` diagnostics.
+It never sends requests and uses only standard-library and public SDK
+dependencies.
 
-Static requests return an exact count of distinct request labels with
-`Unit: "request labels"`. An omitted or empty `label` defaults to
+With counting enabled, static requests return a count of distinct request labels
+with `Unit: "request labels"`. An omitted or empty `label` defaults to
 `method + " " + URL`; repeated labels count once, including collisions between
-explicit and default names. For example, the request above returns:
+explicit and default names. With both checks enabled, the request above returns:
 
 ```json
-{"status":"valid","analysis":{"status":"exact","unit":"request labels","count":1}}
+{"status":"valid","label_count":{"count":1,"unit":"request labels"}}
 ```
+
+Setting `SkipPlanFileValidation` still allows counting parseable input without
+requiring semantically valid methods or URLs. Unknown fields are ignored in this
+mode; parsing failures or trailing input produce `{"status":"skipped"}` without
+a count or diagnostics. A decoded empty requests array can report a zero count.
+Setting `SkipLabelCounting` preserves validation and its diagnostics but omits
+the count. Setting both flags returns `{"status":"skipped"}` without parsing.
+Cancellation remains an error under every flag combination.
 
 Top-level `"dynamicLabels":true` declares runtime-generated request names:
 
@@ -190,11 +196,11 @@ Top-level `"dynamicLabels":true` declares runtime-generated request names:
 {"dynamicLabels":true,"requests":[{"method":"GET","url":"https://example.com"}]}
 ```
 
-After the same syntax and configuration checks, it returns dynamic analysis
-rather than a partial or guessed static count:
+With validation enabled, the same syntax and configuration checks run, but
+counting supplies no count:
 
 ```json
-{"status":"valid","analysis":{"status":"dynamic","unit":"request labels","count":0}}
+{"status":"valid"}
 ```
 
 Run `make test-validation` for the contract and JSON validator example tests with
