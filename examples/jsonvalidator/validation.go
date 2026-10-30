@@ -17,18 +17,23 @@ import (
 )
 
 type config struct {
-	Requests []request `json:"requests"`
+	Requests      []request `json:"requests"`
+	DynamicLabels bool      `json:"dynamicLabels"`
 }
 
 type request struct {
 	Method string `json:"method"`
 	URL    string `json:"url"`
+	Label  string `json:"label"`
 }
 
 // Validate accepts a JSON object containing a nonempty requests array, for
-// example {"requests":[{"method":"GET","url":"https://example.com"}]}.
+// example {"requests":[{"method":"GET","url":"https://example.com","label":"home"}]}.
 // Unknown fields, trailing JSON, empty methods, and URLs without an HTTP(S)
 // scheme and host are rejected. It never sends requests.
+// Static analysis counts distinct labels; an omitted or empty label defaults to
+// method + " " + URL. Top-level "dynamicLabels":true declares runtime-generated
+// names and returns dynamic analysis instead of claiming an exact static count.
 func Validate(ctx context.Context, artifact validation.Artifact) (validation.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return validation.Result{}, err
@@ -88,7 +93,26 @@ func Validate(ctx context.Context, artifact validation.Artifact) (validation.Res
 	if len(diagnostics) != 0 {
 		return validation.Result{Status: validation.Invalid, Diagnostics: diagnostics}, nil
 	}
-	return validation.Result{Status: validation.Valid}, nil
+	analysis := &validation.LabelAnalysis{
+		Status: validation.AnalysisDynamic,
+		Unit:   "request labels",
+	}
+	if !cfg.DynamicLabels {
+		labels := make(map[string]struct{}, len(cfg.Requests))
+		for _, request := range cfg.Requests {
+			if err := ctx.Err(); err != nil {
+				return validation.Result{}, err
+			}
+			label := request.Label
+			if label == "" {
+				label = request.Method + " " + request.URL
+			}
+			labels[label] = struct{}{}
+		}
+		analysis.Status = validation.AnalysisExact
+		analysis.Count = len(labels)
+	}
+	return validation.Result{Status: validation.Valid, Analysis: analysis}, nil
 }
 
 func invalid(code, message string) validation.Result {

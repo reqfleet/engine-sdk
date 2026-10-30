@@ -122,26 +122,80 @@ caller-owned and must not be mutated or retained after the callback returns.
 | `unsupported` | Validation is unavailable; optional diagnostics explain why. Not success. |
 
 Call `Result.Check()` to reject empty/unknown statuses, malformed diagnostics,
-and negative coordinates. Nonzero `line` and `column` values are one-based; zero
-means unspecified. Diagnostics retain their order. A Go error denotes an
-operational failure or cancellation, never an invalid artifact.
+negative coordinates, and malformed analysis. Nonzero `line` and `column` values
+are one-based; zero means unspecified. Diagnostics retain their order. A Go error
+denotes an operational failure or cancellation, including analyzer failures,
+never an invalid artifact. Return that error; do not downgrade it to an
+`unsupported` or `dynamic` analysis result.
 
-Validation does not grant upload admission or execution capability and does not
-report label counts, cardinality safety, or transformed content. Registration,
-format/capability discovery, upload safeguards, preparation, and tier policy
-belong to the host. Skipped validation must not be represented as `valid`.
+The same callback can return `Result.Analysis` alongside validation and reuse its
+parsed content. These are independent outcomes: `valid` does not imply an exact
+count is available. The public callback accepts no tier or label-limit input;
+adapters return facts and the hosting control plane compares exact counts to its
+tier policy. Invalid or unsupported **validation** results must not carry
+analysis; unsupported **analysis** can accompany valid syntax.
+
+`Analysis` is an optional `*validation.LabelAnalysis` with `Status`, `Unit`, and
+integer `Count` fields:
+
+| Analysis status | Meaning |
+| --- | --- |
+| `exact` | An exact nonnegative count. `Count: 0` means exactly zero. A nonblank `Unit` is required. |
+| `dynamic` | Counted entities depend on execution; no exact static count is asserted. |
+| `unsupported` | The analyzer cannot determine the count. |
+| `not_applicable` | This analysis does not apply to the engine's artifact. |
+
+For every non-exact status, `Count` must be zero and `Unit` is optional. This zero
+does **not** assert zero entities. A nil `Analysis` means unavailable or not
+supplied, never exact zero. JSON omits nil analysis and includes `count` even when
+zero; consumers must inspect `status`, not treat the numeric field alone as proof.
+`Unit` identifies engine-defined entities, such as `"tasks"`, `"test labels"`, or
+`"request labels"`. In particular, Locust's static task/decorator count is not an
+emitted request-label cardinality.
+
+Validation and analysis do not grant upload admission or execution capability,
+prove runtime cardinality safety, or transform content. Runtime still enforces
+its distinct-label cap, including dynamically named labels. Non-exact metadata
+does not itself authorize admission; the host requires an explicitly registered,
+verified runtime-bounded integration. Registration, format/capability discovery,
+upload safeguards, preparation, and tier policy belong to the host. Skipped
+validation must not be represented as `valid`; hosts can separately call
+`LabelAnalysis.Check()`, but an empty validation status is not a public callback
+outcome.
 
 The real [`jsonvalidator.Validate`](examples/jsonvalidator/validation.go) example
 accepts:
 
 ```json
-{"requests":[{"method":"GET","url":"https://example.com"}]}
+{"requests":[{"method":"GET","url":"https://example.com","label":"home"}]}
 ```
 
 It rejects malformed/trailing JSON with `syntax` diagnostics and unknown fields,
 invalid field types, empty request arrays/methods, and URLs without an HTTP(S)
 scheme and host with `configuration` diagnostics. It never sends requests and
 uses only standard-library and public SDK dependencies.
+
+Static requests return an exact count of distinct request labels with
+`Unit: "request labels"`. An omitted or empty `label` defaults to
+`method + " " + URL`; repeated labels count once, including collisions between
+explicit and default names. For example, the request above returns:
+
+```json
+{"status":"valid","analysis":{"status":"exact","unit":"request labels","count":1}}
+```
+
+Top-level `"dynamicLabels":true` declares runtime-generated request names:
+
+```json
+{"dynamicLabels":true,"requests":[{"method":"GET","url":"https://example.com"}]}
+```
+
+After the same syntax and configuration checks, it returns dynamic analysis
+rather than a partial or guessed static count:
+
+```json
+{"status":"valid","analysis":{"status":"dynamic","unit":"request labels","count":0}}
+```
 
 Run `make test-validation` for the contract and JSON validator example tests with
 race detection, without Docker. These tests also run through `make test-sdk` and

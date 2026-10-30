@@ -75,5 +75,20 @@
 // mapping. See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
 //
+// The control plane supplies a numeric LabelsUsageLimit; the SDK has no tier
+// policy. Both ingestion modes permit at most that many named request labels
+// plus one overflow label per agent/run. Zero folds all names. Native admission
+// is stable across scrapes, and colliding cumulative counters and histograms are
+// aggregated within each snapshot, not added again across snapshots. The producer
+// must retain its cumulative source series for the run. NativeMetricsOverflowLabel
+// defaults to "others"; Replay selects "_other_".
+//
+// Native producers serve Prometheus text snapshots of at most 16 MiB. Invalid
+// snapshots fail rather than bypassing label admission. Native admission survives
+// completion for final scrapes and resets on the next successful workload launch;
+// the final scrape still needs a reachable producer. This bounds exported request
+// labels, not producer memory, other metric dimensions, or plan-wide labels across
+// agents. Exact preflight analysis does not guarantee runtime label cardinality.
+//
 // [metrics contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md
 package agent

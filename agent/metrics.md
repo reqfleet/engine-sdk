@@ -14,7 +14,7 @@ caller-owned; collectors, histogram bounds, and event recording remain in `agent
 | Mode | `AgentServerOptions` | Ownership |
 | --- | --- | --- |
 | Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
-| Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` | The adapter produces the complete normalized Prometheus exposition; the runtime proxies it. |
+| Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` | The adapter produces the complete normalized Prometheus exposition; the runtime enforces request-label admission and aggregates folded series. |
 | Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
 
 In native mode, `ResultFile` may name ordinary workload output. It is never tailed
@@ -23,12 +23,15 @@ Setting `MetricsURL` selects native mode; a native endpoint cannot also use a pa
 
 `Run` rejects invalid options before starting background work. Direct use of the
 metrics HTTP handler returns 503 for the same invalid configuration. Validation
-checks source conflicts, then schema, then URL. Errors identify the remedy:
+checks the numeric budget and selected metrics source, schema, and URL. Errors
+identify the remedy:
 
+- `metrics label limit must be nonnegative`
 - `result-file metrics require both ResultFile and MetricParser`
 - `native metrics schema requires MetricsURL`
 - `native metrics cannot also configure MetricParser`
 - `unsupported native metrics schema %q; require shibuya-v1 from an adapter-normalized endpoint`
+- `native metrics overflow label must be others or _other_`
 - `native metrics URL must use http or https and include a host`
 
 Choose an integration based on both how the engine exposes metrics and the schema
@@ -40,16 +43,35 @@ accumulates those events into the Prometheus metrics required by the control pla
 If an engine exposes Prometheus metrics with a different schema, provide an
 adapter-owned endpoint that normalizes them to `shibuya-v1`, or use per-request
 result events with a `MetricParser`. The schema declaration is the producer's
-promise that its endpoint follows this contract; the runtime does not validate
-every scraped sample.
+promise that its endpoint follows this contract. The runtime checks what is
+needed for safe label folding; it is not a complete profile-conformance validator.
 
 When `MetricsURL` is set, each scrape of the agent's `/metrics` endpoint is
-forwarded to that URL. The agent returns the endpoint's Prometheus exposition
-unchanged. The engine or adapter supplies the identity labels, metric names,
-units, histogram buckets, and resource metrics required by this contract.
-Upstream errors are returned as errors rather than replaced with an empty
-registry response. Metrics-gateway admission by metric name does not establish
-semantic conformance.
+forwarded to that URL. The engine or adapter supplies the identity labels, metric
+names, units, histogram buckets, and resource metrics required by this contract.
+The SDK folds excess request labels and returns re-encoded Prometheus text.
+Metrics-gateway admission by metric name does not establish semantic conformance.
+
+Native producers must serve Prometheus text exposition (`text/plain; version=0.0.4`).
+The SDK requests that format with `Accept-Encoding: identity` and bounds each
+successful upstream snapshot to **16 MiB**. Compressed responses, malformed
+exposition, unsafe request-series aggregation, oversized snapshots, and non-200
+2xx responses fail with HTTP 502 and an explanatory error. Upstream non-2xx
+status/body responses are preserved; connection failures return 502. Errors
+never fall back to an empty registry or a cached successful snapshot.
+
+Request-labelled native metrics must identify the assigned collection, plan,
+run, engine, and zone. They must be finite nonnegative counters or classic
+histograms, without explicit sample timestamps. Histograms require a sum,
+integer count, cumulative ordered buckets, and a `+Inf` bucket equal to the count.
+Colliding histograms must have compatible bucket boundaries. Known request
+families must have their declared counter/histogram type and request label;
+status counters must also carry `status`. Duplicate series, missing or duplicate
+histogram components, and numeric aggregation overflow are errors. These checks
+do not replace the producer's responsibility for the profile's exact bounds and
+units. Additional request-labelled counter/histogram families, such as Replay's
+optional schedule-lateness histogram, share the same admission mapping.
+Unlabelled resource families are not folded.
 
 ## Identity and metric families
 
@@ -76,10 +98,9 @@ A classic histogram's sample series are its `_bucket`, `_sum`, and `_count`
 components. The base family name is not itself a sample series. Preserve these
 historical names rather than adding `_total` or changing the byte-counter name.
 
-Request labels must be shorter than 1024 bytes in the result-file path. Parser
-errors and invalid request labels drop the whole event. Runtime cardinality
-limits fold excess distinct request labels into `others`; Replay uses `_other_`.
-The proxy preserves each producer's label convention.
+Request labels must be shorter than 1024 bytes in both ingestion modes. Parser
+errors and invalid labels drop the whole result-file event; invalid native
+request labels reject the scrape.
 
 Use lowercase reserved labels `ttft` and `llm_resp` for optional LLM timing.
 The runtime routes `llm_resp` events into the separate wide histogram (its routing
@@ -88,6 +109,38 @@ comparison is case-insensitive, but reporting selectors use the lowercase label)
 do not emit a fabricated zero timing. Status and byte counters still reflect the
 events the adapter records; synthetic timing events must not be assumed to be
 additional HTTP requests without understanding that adapter's event model.
+
+## Request-label budget
+
+The control plane supplies a nonnegative numeric `LabelsUsageLimit` to each
+agent. The SDK enforces it without interpreting tiers: a budget of **N permits
+at most N named request labels plus one overflow label per agent/run**. Zero
+permits only the overflow label; negative budgets are invalid configuration.
+This is not a global plan-wide budget across agents. It does not cap producer
+memory, source-side series, metric-family names, statuses, or other Prometheus
+dimensions. A successful exact preflight count describes the analyzed artifact,
+not a guarantee of the labels that runtime code will emit.
+
+Result-file ingestion admits names in event order and folds excess names into
+`others`. Native ingestion sorts newly encountered names within each successful
+scrape before filling remaining slots. Once admitted, a name retains its slot
+for that run, even if it disappears from later scrapes. Rotating names cannot
+reclaim slots. All native request-labelled families use the same mapping, and a
+rejected scrape consumes no admission slots.
+
+Native `AgentServerOptions.NativeMetricsOverflowLabel` defaults to `others`;
+Replay sets it to `_other_`. These are the only supported values. Only the
+configured overflow name is exempt from the named-label budget; the other
+spelling is an ordinary name. Collisions with an existing overflow series are
+aggregated, not emitted as duplicate series.
+
+Native folding sums the **current cumulative snapshot** of counters and
+histograms for series that become identical after replacing `label`, preserving
+all other label dimensions, including status groups. It sums bytes, histogram
+counts, sums, and corresponding cumulative buckets; it never adds a previous
+scrape's values again. The SDK retains admitted names, not a history of
+overflow-source names or values.
+
 
 ## Histogram compatibility
 
@@ -130,10 +183,19 @@ endpoint every **1 second by default**, in both result-file and native modes.
 
 Counters and histogram components accumulate for one engine/run identity. Each
 scrape captures their current cumulative values. Give each run a new run ID and
-maintain cumulative values throughout the run so final summary queries can read
-the totals directly. Registry mode retains old-run series for the agent process
-lifetime; a native endpoint's lifetime follows its engine. Missing final scrapes
-or undrained result rows can affect reported totals.
+retain every source series and its cumulative values throughout that run, even
+when a request label stops producing events. Do not rotate away source counters,
+reset them within a run, or expose per-scrape deltas. Native folding cannot
+reconstruct vanished source series or repair resets; the producer owns cumulative
+retention so final summary queries can read the totals directly.
+
+Registry mode retains old-run series for the agent process lifetime and rejects
+late result-file events after run completion. Native admission state survives
+completion so the final upstream snapshot uses the same mapping, and resets on
+the next successful workload launch. A final native scrape still requires a
+reachable producer serving the completed run's cumulative snapshot: the SDK does
+not retain a cached metrics response. Missing final scrapes or undrained result
+rows can affect reported totals.
 
 Apply the selected collection/run/plan/label/zone filters to these formulas:
 
@@ -213,6 +275,7 @@ renaming coarse buckets, summaries, or percentiles.
 
 - [Agent options, validation, and ingestion](server.go)
 - [Registry and native reverse proxy](http.go)
+- [Native label admission and snapshot folding](metrics_native.go)
 - [Public metric event and producer definitions](metrics.go)
 - [Producer histogram regression tests](metrics_producer_test.go)
 - [Replay histogram implementation](https://github.com/reqfleet/replay/blob/main/internal/metrics/metrics.go)

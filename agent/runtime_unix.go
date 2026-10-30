@@ -91,9 +91,7 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 		run.status.StartupStatus = protocol.StartupStateStarted
 		run.status.State = protocol.RunRunning
 	}
-	as.labelsLock.Lock()
-	as.labelsByRun[run.context.RunID] = make(map[string]struct{})
-	as.labelsLock.Unlock()
+	as.startMetricsRun(run.context.RunID)
 	as.stateLock.Unlock()
 
 	var readers sync.WaitGroup

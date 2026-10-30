@@ -14,13 +14,35 @@
 // for the artifact; it is distinct from success and may explain the limitation
 // in diagnostics. Diagnostic coordinates are one-based when nonzero; zero means
 // unspecified. Result.Check rejects unknown or empty statuses, malformed
-// diagnostics, and negative coordinates. Diagnostic ordering is preserved.
-// A Go error represents an operational failure or cancellation, not rejection of
-// an invalid artifact. Callers must check both the error and the result contract.
+// diagnostics, negative coordinates, and malformed analysis. Diagnostic ordering
+// is preserved. A Go error represents an operational failure or cancellation,
+// including an analyzer failure, not rejection of an invalid artifact. Do not
+// downgrade operational failures to unsupported or dynamic analysis. Callers must
+// check both the error and the result contract.
 //
-// A valid result does not grant upload admission or execution capability and says
-// nothing about label counts, runtime cardinality safety, or artifact rewriting.
-// Operator policy that skips validation must not be represented as Valid. Engine
+// A Validator can return Result.Analysis alongside validation in the same
+// invocation, reusing parsed content. The two outcomes remain distinct: successful
+// validation does not imply that an exact count is available. The callback takes
+// no tier or limit input and returns facts; the host applies admission policy.
+// Invalid and Unsupported validation results must not carry analysis.
+//
+// LabelAnalysis counts engine-defined entities identified by Unit, for example
+// "tasks", "test labels", or "request labels". A Locust static task/decorator count
+// is not a count of emitted request labels. AnalysisExact requires a nonnegative
+// Count and a nonblank Unit; zero means an exact zero count. AnalysisDynamic means
+// the entities depend on execution, AnalysisUnsupported means the analyzer cannot
+// determine a count, and AnalysisNotApplicable means this analysis does not apply
+// to the engine's artifact. These non-exact states require Count to be zero, but
+// that value asserts no count; Unit is optional. Nil Analysis means unavailable or
+// not supplied, never an exact zero. JSON includes count even when it is zero;
+// consumers must interpret it together with status.
+//
+// A valid result or exact preflight count does not grant upload admission or
+// execution capability, prove runtime cardinality safety, or rewrite artifacts.
+// Runtime still enforces a distinct-label cap, including dynamically named labels.
+// Operator policy that skips validation must not be represented as Valid. Hosts
+// may check analysis separately with LabelAnalysis.Check when validation is
+// skipped; an empty validation status is not a public Validator outcome. Engine
 // registration, capability discovery, invocation, upload safeguards, tier policy,
 // and preparation of stored content belong to the host, not this package.
 package validation

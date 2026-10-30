@@ -17,7 +17,7 @@ the engine-specific adapter code and its runnable image.
 | Input artifacts | Serves test scripts, data, optional native config, and dependency declarations selected for the run | Downloads and stages files before the relevant callbacks | Declare expected filenames/formats and consume staged paths; generate engine-local files only where needed |
 | Dependencies | Supplies the declaration, if any, and authorizes the preparation stage | Stages the declaration, invokes the hook, and exposes preparation status | Install, remove, and reconcile dependencies in `PrepareDependencies`, including cancellation and rollback |
 | Lifecycle | Sends prepare/start/stop commands and the stop reason; polls agent status | Coordinator subscription, lifecycle state, command launch, process supervision, and cleanup | Supply `BuildCommand` and any needed preparation, readiness, progress, or graceful-stop hooks |
-| Metrics | Reqfleet metrics collector scrapes the agent; the control plane owns storage, aggregation, and reporting | Exposes `/metrics`; ingests parsed result events or proxies a declared native endpoint | Map engine output to the reporting contract through a parser or normalized native endpoint |
+| Metrics | Supplies the numeric request-label budget; the collector scrapes the agent; owns tier policy, storage, aggregation, and reporting | Exposes `/metrics`; ingests parsed events or folds native cumulative snapshots under per-agent/run label admission | Map engine output to the reporting contract through a parser or normalized native endpoint; retain native cumulative source series |
 
 For a new engine, agree the settings schema, artifact/config filenames and
 rendering, dependency format, and image launch requirements with the control-plane
@@ -51,7 +51,7 @@ adapter is supplied here.
 | [`agent/run.go`](agent/run.go), [`agent/command.go`](agent/command.go) | `RunContext`, `Workspace`, `Process`, and the command returned by an adapter |
 | [`agent/lifecycle.go`](agent/lifecycle.go) | SDK-owned preparation, lifecycle state, observations, and cancellation |
 | [`agent/runtime_unix.go`](agent/runtime_unix.go), [`agent/runtime_unsupported.go`](agent/runtime_unsupported.go) | Unix runtime startup, process supervision and cleanup; explicit execution rejection on non-Unix systems |
-| [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go) | Authenticated endpoints, native metrics proxy, result-event ingestion and collectors |
+| [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, result-event collectors, native request-label admission and snapshot folding |
 | [`protocol`](protocol) | Coordinator messages, explicit run/artifact assignments, lifecycle states, errors, and artifact paths |
 | [`metricschema`](metricschema) | Collector-free metric names, reserved request labels, and ordered label definitions |
 | [`validation`](validation/doc.go) | Synchronous upload-validation contract, structured diagnostics, and result checks; not part of agent execution |
@@ -210,16 +210,35 @@ one of these modes:
   feed cumulative snapshots into a per-request event parser.
 - **Normalized native endpoint:** set an HTTP(S) `MetricsURL` and
   `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`; leave `MetricParser` nil.
-  The SDK proxies the endpoint unchanged, so the adapter must supply the complete
-  compatible exposition, including identity labels and resource metrics.
+  Supply Prometheus text exposition with complete compatible identity labels,
+  resource metrics, and cumulative request counters/histograms. The SDK enforces
+  request-label admission and aggregates folded series rather than proxying
+  bytes unchanged. `NativeMetricsOverflowLabel` defaults to `others`; select
+  `_other_` for Replay's convention.
   `ResultFile` may name ordinary workload output in this mode but is not tailed.
 - **Registry only:** leave all metrics options unset. The runtime registry is
   exposed without request-event ingestion; this is not complete request reporting.
 
+The control plane supplies the numeric `LabelsUsageLimit`; the SDK does not decide
+tiers. A nonnegative budget N permits N named request labels plus one overflow
+label per agent/run; zero folds all names. Native names keep their slots across
+scrapes, with deterministic admission of new names within a scrape. Rejected
+scrapes do not consume slots. Preserve cumulative source series throughout a run:
+folding sums each current snapshot, not deltas or previously scraped values.
+Native admission survives completion and resets on the next successful launch;
+the final scrape still requires a reachable producer. Do not assume this limits
+producer memory, other Prometheus dimensions, or global plan-wide cardinality.
+An exact preflight count is not a guarantee of runtime labels.
+
 An arbitrary Prometheus endpoint is not automatically compatible. Declaring
-`shibuya-v1` promises conformance; the SDK does not normalize or validate every
-scraped sample. Use `metricschema` definitions rather than private collectors or
-copied metric-name strings. Its label-list functions return caller-owned slices.
+`shibuya-v1` promises conformance; the SDK checks safe folding, not every profile
+requirement. Native successful snapshots are limited to 16 MiB of uncompressed
+Prometheus text. Malformed or unsafe snapshots return HTTP 502 rather than
+passing through; upstream failures are not replaced with empty or cached metrics.
+Use [the metrics contract](agent/metrics.md) for the full format, aggregation,
+error, and lifecycle rules. Use `metricschema` definitions rather than private
+collectors or copied metric-name strings. Its label-list functions return
+caller-owned slices.
 
 ## Prepare the engine image and workspace
 
@@ -305,6 +324,8 @@ Existing behavior tests show the repository's conventions:
   metrics option admission, proxy behavior, and coordinator trust.
 - [Metric producer tests](agent/metrics_producer_test.go): event accumulation,
   identity, and compatible histogram output.
+- [Native metrics tests](agent/metrics_native_test.go): numeric budgets, stable
+  admission, cumulative folding, malformed input, and final/next-run scrapes.
 
 For an adapter, build the image you supply and exercise the actual engine with
 the control-plane integration's coordinator, artifact service, metrics collector,

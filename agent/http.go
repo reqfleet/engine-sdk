@@ -41,6 +41,12 @@ func (as *AgentServer) metricsHandler() http.Handler {
 			out.Host = target.Host
 			out.URL.Path = target.Path
 			out.URL.RawPath = target.RawPath
+			out.Header.Set("Accept", "text/plain; version=0.0.4")
+			out.Header.Set("Accept-Encoding", "identity")
+		},
+		ModifyResponse: as.foldNativeMetrics,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, "native metrics: "+err.Error(), http.StatusBadGateway)
 		},
 	}
 }

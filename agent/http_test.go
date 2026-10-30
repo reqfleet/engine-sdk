@@ -30,6 +30,8 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 	}{
 		{name: "registry"},
 		{name: "result events", options: AgentServerOptions{ResultFile: "results", MetricParser: parser}, resultMetrics: true},
+		{name: "negative result label limit", options: AgentServerOptions{ResultFile: "results", MetricParser: parser, LabelsUsageLimit: -1}, invalid: true},
+		{name: "negative native label limit", options: AgentServerOptions{MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: -1}, invalid: true},
 		{name: "unpaired file", options: AgentServerOptions{ResultFile: "results"}, invalid: true},
 		{name: "unpaired parser", options: AgentServerOptions{MetricParser: parser}, invalid: true},
 		{name: "schema without URL", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
@@ -37,6 +39,7 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 		{name: "native file and parser conflict", options: AgentServerOptions{ResultFile: "results", MetricParser: parser, NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: source.URL}, invalid: true},
 		{name: "missing schema", options: AgentServerOptions{MetricsURL: source.URL}, invalid: true},
 		{name: "unknown schema", options: AgentServerOptions{NativeMetricsSchema: "native-v2", MetricsURL: source.URL}, invalid: true},
+		{name: "unknown overflow label", options: AgentServerOptions{MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, NativeMetricsOverflowLabel: "unbounded"}, invalid: true},
 		{name: "malformed URL", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: "://bad"}, invalid: true},
 		{name: "missing scheme", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: "//localhost:9102/metrics"}, invalid: true},
 		{name: "missing host", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: "http:///metrics"}, invalid: true},
