@@ -75,5 +75,34 @@
 // mapping. See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
 //
+// Runtime label admission uses AgentServerOptions.LabelsUsageLimit, not coordinator
+// run messages. MakeAgentServer reads the lowercase label_limit environment
+// variable (default 10); NewAgentServer uses the option directly. The SDK has no
+// tier policy. Workloads inherit label_limit if present; Command.Env may override
+// it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce
+// their own configured limits.
+// Native proxying streams by default without parsing, format negotiation,
+// validation, or SDK label admission.
+//
+// FoldNativeMetrics explicitly enables last-resort SDK folding for native engines
+// that cannot enforce the budget. It buffers and parses each Prometheus text
+// snapshot (at most 16 MiB), validates safe aggregation, and re-encodes the result.
+// Invalid snapshots fail rather than bypassing admission. Admission is stable
+// across scrapes; colliding cumulative counters and histograms are aggregated
+// within each snapshot, not added again across snapshots. The producer must retain
+// cumulative source series for the run. NativeMetricsOverflowLabel defaults to
+// "others"; Replay's engine-owned overflow convention is "_other_".
+// Replay handles its limits through config.yaml with SDK folding disabled.
+// Its native max_labels=0 setting remains unlimited.
+//
+// With folding enabled, admission survives completion for final scrapes and resets
+// on the next successful workload launch; the producer must still be reachable.
+// This bounds exported request labels, not producer memory, other dimensions, or
+// plan-wide labels across agents. Result-file ingestion and opt-in folding permit
+// N named labels plus one overflow label; zero permits only overflow in these
+// SDK-managed modes. Upload validators return optional preflight counts to the
+// calling control plane without tier or label-limit inputs; those counts do not
+// guarantee runtime cardinality.
+//
 // [metrics contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md
 package agent

@@ -142,3 +142,49 @@ func TestMetricLabelLengthBoundary(t *testing.T) {
 		assert.Equal(t, size >= 1024, err != nil)
 	}
 }
+
+func TestMetricsIngestionNumericLabelBudget(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		limit int
+		want  map[string]float64
+	}{
+		{"zero", 0, map[string]float64{"others": 5}},
+		{"two", 2, map[string]float64{"a": 2, "b": 1, "others": 2}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			meta := EngineMeta{CollectionID: t.Name(), PlanID: "plan", EngineID: "engine", Zone: "zone"}
+			identity := prometheus.Labels{"collection_id": meta.CollectionID}
+			t.Cleanup(func() {
+				labelLatencyHistogram.DeletePartialMatch(identity)
+				statusCounter.DeletePartialMatch(identity)
+				egressCounter.DeletePartialMatch(identity)
+				threadsGauge.DeletePartialMatch(identity)
+			})
+			as := NewAgentServer(AgentServerOptions{
+				EngineMeta: meta, ResultFile: "results", LabelsUsageLimit: test.limit,
+				MetricParser: func(label string) (ShibuyaMetric, error) {
+					return ShibuyaMetric{Label: label, Status: "200", Latency: 1, EgressBytes: 10}, nil
+				},
+			})
+			as.startMetricsRun("run")
+			for _, label := range []string{"a", "b", "c", "a", "others"} {
+				as.makePromMetrics(metricEvent{runID: "run", line: label})
+			}
+			families, err := metricsRegistry().Gather()
+			require.NoError(t, err)
+			counts := make(map[string]float64)
+			for _, family := range families {
+				if family.GetName() != "shibuya_status_counter" {
+					continue
+				}
+				for _, metric := range family.Metric {
+					if nativeLabelValue(metric, "collection_id") == meta.CollectionID {
+						counts[nativeLabelValue(metric, "label")] = metric.GetCounter().GetValue()
+					}
+				}
+			}
+			assert.Equal(t, test.want, counts)
+		})
+	}
+}

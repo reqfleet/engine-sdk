@@ -4,15 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Status describes validation, not upload admission or execution capability.
 type Status string
 
 const (
-	Valid       Status = "valid"
-	Invalid     Status = "invalid"
-	Unsupported Status = "unsupported"
+	Valid   Status = "valid"
+	Invalid Status = "invalid"
+	Skipped Status = "skipped"
 )
 
 // Artifact is an uploaded file. The caller owns Content; validators must not
@@ -31,31 +32,67 @@ type Diagnostic struct {
 	Column  int    `json:"column,omitempty"`
 }
 
-// Result describes validation without implying admission approval, a label
-// count, runtime cardinality safety, or transformed artifact content.
+// LabelCount reports a best-effort count of engine-defined entities, not runtime
+// cardinality safety. Unit identifies the entities, such as "request labels".
+type LabelCount struct {
+	Count int    `json:"count"`
+	Unit  string `json:"unit"`
+}
+
+// Check reports whether the count obeys the public contract.
+func (c LabelCount) Check() error {
+	if c.Count < 0 {
+		return errors.New("label count must not be negative")
+	}
+	if strings.TrimSpace(c.Unit) == "" {
+		return errors.New("label count must have a nonempty unit")
+	}
+	return nil
+}
+
+// Result describes optional upload checks, not admission approval, runtime
+// cardinality safety, or transformed content. A nil LabelCount means no count was
+// supplied; a nonnil count can report zero.
 type Result struct {
 	Status      Status       `json:"status"`
 	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+	LabelCount  *LabelCount  `json:"label_count,omitempty"`
 }
 
-// Validator synchronously parses or compiles an artifact without executing the
-// uploaded test. It should honor context cancellation where possible. A returned
-// error denotes an operational failure or cancellation, not an invalid artifact.
-type Validator func(context.Context, Artifact) (Result, error)
+// Options independently disable optional upload checks.
+type Options struct {
+	SkipPlanFileValidation bool `json:"skip_plan_file_validation"`
+	SkipLabelCounting      bool `json:"skip_label_counting"`
+}
 
-// Check reports whether the result obeys the validation contract. Unsupported is
-// a well-formed result, but is not successful validation. A zero Result is invalid.
+// Validator checks an artifact without executing the uploaded test. It honors
+// both skip options independently and should honor cancellation where possible.
+// Adapters may return Skipped or omit LabelCount when a check is unavailable.
+// A returned error denotes an operational failure or cancellation, not an invalid
+// artifact. No tier or limit policy is supplied to the callback.
+type Validator func(context.Context, Artifact, Options) (Result, error)
+
+// Check reports whether the result obeys the validation contract. Valid and
+// Skipped may carry a count, but no diagnostics. Invalid requires diagnostics and
+// must not carry a count. A zero Result is malformed.
 func (r Result) Check() error {
+	if r.LabelCount != nil {
+		if err := r.LabelCount.Check(); err != nil {
+			return fmt.Errorf("label count: %w", err)
+		}
+		if r.Status == Invalid {
+			return errors.New("invalid result must not contain a label count")
+		}
+	}
 	switch r.Status {
-	case Valid:
+	case Valid, Skipped:
 		if len(r.Diagnostics) != 0 {
-			return errors.New("valid result must not contain diagnostics")
+			return fmt.Errorf("%s result must not contain diagnostics", r.Status)
 		}
 	case Invalid:
 		if len(r.Diagnostics) == 0 {
 			return errors.New("invalid result must contain at least one diagnostic")
 		}
-	case Unsupported:
 	default:
 		return fmt.Errorf("unknown validation status %q", r.Status)
 	}

@@ -78,6 +78,11 @@ type AgentServer struct {
 	labelsByRun      map[string]map[string]struct{}
 	labelsUsageLimit int
 
+	// Native admission survives run completion for the final upstream scrape.
+	nativeMetricsLock sync.Mutex
+	nativeMetricsRun  string
+	nativeLabels      map[string]struct{}
+
 	// Subscription status
 	subStausMu            sync.RWMutex
 	coordinatorSubscribed bool
@@ -114,7 +119,6 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 		reqOpts:          opts.EngineMeta.makeReqOpts(),
 		logger:           opts.Logger,
 		angentDir:        NewAgentDirHandler(""),
-		labelsByRun:      make(map[string]map[string]struct{}),
 		labelsUsageLimit: opts.LabelsUsageLimit,
 		pubsubClient: pubsub.PubSubClient{
 			Addr:     net.JoinHostPort(opts.EngineMeta.CoordinatorIP, "2416"),
@@ -124,6 +128,9 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 				MinVersion: tls.VersionTLS12,
 			},
 		},
+	}
+	if opts.MetricsURL == "" {
+		as.labelsByRun = make(map[string]map[string]struct{})
 	}
 	return as
 }
@@ -366,11 +373,18 @@ type AgentServerOptions struct {
 	StopTimeout         time.Duration
 	MetricsURL          string
 	NativeMetricsSchema MetricsSchema
-	MetricParser        func(string) (ShibuyaMetric, error)
-	ResultFile          string
-	Logger              *log.Entry
-	ConfFileName        string
-	LabelsUsageLimit    int
+	// FoldNativeMetrics opts into SDK parsing and label folding as a last resort.
+	// By default the native endpoint streams unchanged and the engine must enforce
+	// its own configured label limit.
+	FoldNativeMetrics bool
+	// NativeMetricsOverflowLabel selects the folding fallback's overflow name.
+	// It defaults to "others"; use "_other_" for Replay's convention.
+	NativeMetricsOverflowLabel string
+	MetricParser               func(string) (ShibuyaMetric, error)
+	ResultFile                 string
+	Logger                     *log.Entry
+	ConfFileName               string
+	LabelsUsageLimit           int
 }
 
 func coordinatorRootCAs(caPEM string) (*x509.CertPool, error) {
@@ -429,6 +443,9 @@ func (as *AgentServer) isSubscribed() bool {
 
 func (as *AgentServer) validateMetricsOptions() error {
 	options := as.options
+	if options.LabelsUsageLimit < 0 {
+		return fmt.Errorf("metrics label limit must be nonnegative")
+	}
 	if options.MetricsURL == "" {
 		if options.NativeMetricsSchema != "" {
 			return fmt.Errorf("native metrics schema requires MetricsURL")
@@ -443,6 +460,9 @@ func (as *AgentServer) validateMetricsOptions() error {
 	}
 	if options.NativeMetricsSchema != MetricsSchemaShibuyaV1 {
 		return fmt.Errorf("unsupported native metrics schema %q; require shibuya-v1 from an adapter-normalized endpoint", options.NativeMetricsSchema)
+	}
+	if options.NativeMetricsOverflowLabel != "" && options.NativeMetricsOverflowLabel != labelOthers && options.NativeMetricsOverflowLabel != "_other_" {
+		return fmt.Errorf("native metrics overflow label must be others or _other_")
 	}
 	target, err := url.Parse(options.MetricsURL)
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
