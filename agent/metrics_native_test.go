@@ -257,6 +257,70 @@ func TestNativeMetricsRejectsMalformedScrapesWithoutConsumingBudget(t *testing.T
 	}
 }
 
+func TestNativeMetricsQuotedHistogramSamples(t *testing.T) {
+	for _, syntax := range []struct {
+		name   string
+		format string
+	}{
+		{"quoted outside braces", `%q{%s}`},
+		{"quoted first inside braces", `{ %q, %s }`},
+		{"quoted last inside braces", `{ %[2]s, %[1]q }`},
+	} {
+		t.Run(syntax.name, func(t *testing.T) {
+			snapshot := func(label string) (string, string, string) {
+				original := nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{label, "200", 3, 10}})
+				var text strings.Builder
+				var sum, count string
+				for line := range strings.Lines(original) {
+					if strings.HasPrefix(line, metricschema.RequestLatency+"_") {
+						open, close := strings.IndexByte(line, '{'), strings.LastIndexByte(line, '}')
+						name := line[:open]
+						line = fmt.Sprintf(syntax.format, name, line[open+1:close]) + line[close+1:]
+						switch name {
+						case metricschema.RequestLatency + "_sum":
+							sum = line
+						case metricschema.RequestLatency + "_count":
+							count = line
+						}
+					}
+					text.WriteString(line)
+				}
+				return text.String(), sum, count
+			}
+			invalid, sum, count := snapshot(`a",}\path`)
+			source, publish := nativeSource(t, invalid)
+			as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
+			as.startMetricsRun("run")
+			handler := as.metricsHandler()
+			for _, duplicate := range []string{strings.TrimSuffix(sum, " 3\n") + " 9\n", count} {
+				publish(invalid + duplicate)
+				response := nativeResponse(handler)
+				require.Equal(t, http.StatusBadGateway, response.Code, response.Body.String())
+			}
+			// Rejected quoted samples must not consume a label slot, and valid
+			// samples using the same syntax must retain their cumulative values.
+			label := `z",}\path`
+			valid, _, _ := snapshot(label)
+			publish(valid)
+			families := nativeScrape(t, handler)
+			assert.Equal(t, map[string]float64{label + "/200": 1}, nativeCounters(families[metricschema.StatusCounter]))
+			metrics := families[metricschema.RequestLatency].Metric
+			require.Len(t, metrics, 1)
+			assert.Equal(t, label, nativeLabelValue(metrics[0], "label"))
+			histogram := metrics[0].GetHistogram()
+			assert.Equal(t, uint64(1), histogram.GetSampleCount())
+			assert.Equal(t, float64(3), histogram.GetSampleSum())
+			for _, bucket := range histogram.Bucket {
+				var want uint64
+				if bucket.GetUpperBound() >= 3 {
+					want = 1
+				}
+				assert.Equal(t, want, bucket.GetCumulativeCount())
+			}
+		})
+	}
+}
+
 func TestNativeMetricsInputBound(t *testing.T) {
 	source, _ := nativeSource(t, "# "+strings.Repeat("x", maxNativeMetricsBytes)+"\n")
 	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1})

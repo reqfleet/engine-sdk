@@ -305,7 +305,12 @@ func checkNativeHistogramSamples(data []byte, families map[string]*dto.MetricFam
 		if end < 0 {
 			continue // The exposition parser diagnoses malformed sample lines.
 		}
-		name := string(line[:end])
+		rawName := line[:end]
+		if end == 0 {
+			rawName = nativeBracedMetricName(line)
+		}
+		// Legacy name validation has already excluded escaped characters.
+		name := string(bytes.Trim(rawName, `"`))
 		base := name
 		for _, suffix := range []string{"_bucket", "_count", "_sum"} {
 			if strings.HasSuffix(name, suffix) {
@@ -341,6 +346,36 @@ func checkNativeHistogramSamples(data []byte, families map[string]*dto.MetricFam
 		}
 		if count != expected {
 			return fmt.Errorf("histogram %s has missing or duplicate sum/count samples", name)
+		}
+	}
+	return nil
+}
+
+// nativeBracedMetricName extracts the standalone name field from an already
+// parsed sample, skipping label assignments and their escaped quoted values.
+func nativeBracedMetricName(line []byte) []byte {
+	start := 1
+	quoted, assignment := false, false
+	for i := 1; i < len(line); i++ {
+		if quoted {
+			switch line[i] {
+			case '\\':
+				i++
+			case '"':
+				quoted = false
+			}
+			continue
+		}
+		switch line[i] {
+		case '"':
+			quoted = true
+		case '=':
+			assignment = true
+		case ',', '}':
+			if !assignment {
+				return bytes.TrimSpace(line[start:i])
+			}
+			start, assignment = i+1, false
 		}
 	}
 	return nil
