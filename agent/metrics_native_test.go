@@ -3,11 +3,13 @@ package agent
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -119,7 +121,7 @@ func TestNativeMetricsNumericLabelBudget(t *testing.T) {
 		t.Run(fmt.Sprintf("limit-%d", test.limit), func(t *testing.T) {
 			text := nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{"b", "200", 3, 20}, {"a", "200", 1, 10}, {"others", "200", 5, 30}})
 			source, _ := nativeSource(t, text)
-			as := NewAgentServer(AgentServerOptions{EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: test.limit})
+			as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: test.limit})
 			as.startMetricsRun("run")
 			handler := as.metricsHandler()
 			for range 2 {
@@ -135,7 +137,7 @@ func TestNativeMetricsNumericLabelBudget(t *testing.T) {
 func TestNativeMetricsStableAdmissionAndCumulativeAggregation(t *testing.T) {
 	observations := []nativeObservation{{"z", "200", 1, 10}}
 	source, publish := nativeSource(t, nativeSnapshot(t, nativeTestMeta, "run", observations))
-	as := NewAgentServer(AgentServerOptions{EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
+	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
 	as.startMetricsRun("run")
 	handler := as.metricsHandler()
 	assert.Equal(t, map[string]float64{"z/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
@@ -181,7 +183,7 @@ func TestNativeMetricsStableAdmissionAndCumulativeAggregation(t *testing.T) {
 
 func TestNativeMetricsReplayOverflowConvention(t *testing.T) {
 	source, publish := nativeSource(t, nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{"a", "200", 1, 1}}))
-	as := NewAgentServer(AgentServerOptions{EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, NativeMetricsOverflowLabel: "_other_", LabelsUsageLimit: 1})
+	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, NativeMetricsOverflowLabel: "_other_", LabelsUsageLimit: 1})
 	as.startMetricsRun("run")
 	handler := as.metricsHandler()
 	assert.Equal(t, map[string]float64{"a/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
@@ -192,7 +194,7 @@ func TestNativeMetricsReplayOverflowConvention(t *testing.T) {
 func TestNativeMetricsFinishAndNextRun(t *testing.T) {
 	meta := EngineMeta{CollectionID: "collection-1", PlanID: "plan-1", EngineID: "0", Zone: "zone-1"}
 	source, publish := nativeSource(t, nativeSnapshot(t, meta, "run-1", []nativeObservation{{"a", "200", 1, 1}}))
-	fixture := newAgentFixture(t, AgentServerOptions{MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1}, nil)
+	fixture := newAgentFixture(t, AgentServerOptions{FoldNativeMetrics: true, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1}, nil)
 	handler := fixture.server.metricsHandler()
 	fixture.send(runMessage(protocol.VerbStart, "run-1", ""))
 	waitRunState(t, fixture, "run-1", protocol.RunRunning)
@@ -243,7 +245,7 @@ func TestNativeMetricsRejectsMalformedScrapesWithoutConsumingBudget(t *testing.T
 	} {
 		t.Run(name, func(t *testing.T) {
 			source, publish := nativeSource(t, invalid)
-			as := NewAgentServer(AgentServerOptions{EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
+			as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
 			as.startMetricsRun("run")
 			handler := as.metricsHandler()
 			response := nativeResponse(handler)
@@ -257,7 +259,7 @@ func TestNativeMetricsRejectsMalformedScrapesWithoutConsumingBudget(t *testing.T
 
 func TestNativeMetricsInputBound(t *testing.T) {
 	source, _ := nativeSource(t, "# "+strings.Repeat("x", maxNativeMetricsBytes)+"\n")
-	as := NewAgentServer(AgentServerOptions{MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1})
+	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1})
 	response := nativeResponse(as.metricsHandler())
 	assert.Equal(t, http.StatusBadGateway, response.Code)
 	assert.NotEmpty(t, response.Body.String())
@@ -271,7 +273,7 @@ func TestNativeMetricsAdmissionAcrossFamiliesAndScrapeOrder(t *testing.T) {
 	atLimit := "# TYPE shibuya_status_counter counter\n" + counter("b") + counter("a")
 	for _, initial := range []string{atLimit, "# TYPE shibuya_status_counter counter\n" + counter("a") + counter("b")} {
 		source, publish := nativeSource(t, initial)
-		as := NewAgentServer(AgentServerOptions{EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 2})
+		as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 2})
 		as.startMetricsRun("run")
 		handler := as.metricsHandler()
 		assert.Equal(t, map[string]float64{"a/200": 1, "b/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
@@ -284,9 +286,51 @@ func TestNativeMetricsAdmissionAcrossFamiliesAndScrapeOrder(t *testing.T) {
 	// different family; map iteration and sample order must not pick the winner.
 	text := "# TYPE shibuya_status_counter counter\n" + counter("z") + "# TYPE shibuya_egress_bytes_counter counter\nshibuya_egress_bytes_counter{" + identity + `,label="a"} 12` + "\n"
 	source, _ := nativeSource(t, text)
-	as := NewAgentServer(AgentServerOptions{EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
+	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
 	as.startMetricsRun("run")
 	families := nativeScrape(t, as.metricsHandler())
 	assert.Equal(t, map[string]float64{"others/200": 1}, nativeCounters(families[metricschema.StatusCounter]))
 	assert.Equal(t, map[string]float64{"a": 12}, nativeCounters(families[metricschema.EgressBytesCounter]))
+}
+
+func TestNativeMetricsDefaultStreamsBeforeSnapshotCompletes(t *testing.T) {
+	prefix := nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{"a", "200", 1, 1}, {"b", "200", 2, 2}})
+	release := make(chan struct{})
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "application/openmetrics-text", r.Header.Get("Accept"))
+		assert.Equal(t, "gzip", r.Header.Get("Accept-Encoding"))
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = io.WriteString(w, prefix)
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+			_, _ = io.WriteString(w, "# snapshot complete\n")
+		case <-r.Context().Done():
+		}
+	}))
+	defer source.Close()
+	as := NewAgentServer(AgentServerOptions{EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
+	as.startMetricsRun("run")
+	proxy := httptest.NewServer(as.metricsHandler())
+	defer proxy.Close()
+	// Always unblock the upstream before closing either server on failure.
+	defer close(release)
+	request, err := http.NewRequest(http.MethodGet, proxy.URL, nil)
+	require.NoError(t, err)
+	request.Header.Set("Accept", "application/openmetrics-text")
+	request.Header.Set("Accept-Encoding", "gzip")
+	client := &http.Client{Timeout: 5 * time.Second}
+	response, err := client.Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	data := make([]byte, len(prefix))
+	_, err = io.ReadFull(response.Body, data)
+	require.NoError(t, err, "valid metrics must arrive while the upstream is still blocked")
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(bytes.NewReader(data))
+	require.NoError(t, err)
+	// Default proxying leaves engine-owned admission alone, even above the
+	// configured budget; enabled folding is covered by the budget tests.
+	assert.Equal(t, map[string]float64{"a/200": 1, "b/200": 1}, nativeCounters(families[metricschema.StatusCounter]))
 }

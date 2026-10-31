@@ -14,7 +14,7 @@ caller-owned; collectors, histogram bounds, and event recording remain in `agent
 | Mode | `AgentServerOptions` | Ownership |
 | --- | --- | --- |
 | Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
-| Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` | The adapter produces the complete normalized Prometheus exposition; the runtime enforces request-label admission and aggregates folded series. |
+| Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` | The engine enforces the assigned label budget and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
 | Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
 
 In native mode, `ResultFile` may name ordinary workload output. It is never tailed
@@ -43,18 +43,28 @@ accumulates those events into the Prometheus metrics required by the control pla
 If an engine exposes Prometheus metrics with a different schema, provide an
 adapter-owned endpoint that normalizes them to `shibuya-v1`, or use per-request
 result events with a `MetricParser`. The schema declaration is the producer's
-promise that its endpoint follows this contract. The runtime checks what is
-needed for safe label folding; it is not a complete profile-conformance validator.
+promise that its endpoint follows this contract. With `FoldNativeMetrics: true`,
+the runtime checks what is needed for safe folding; neither mode is a complete
+profile-conformance validator.
 
 When `MetricsURL` is set, each scrape of the agent's `/metrics` endpoint is
 forwarded to that URL. The engine or adapter supplies the identity labels, metric
 names, units, histogram buckets, and resource metrics required by this contract.
-The SDK folds excess request labels and returns re-encoded Prometheus text.
-Metrics-gateway admission by metric name does not establish semantic conformance.
+By default (`FoldNativeMetrics: false`), the ordinary reverse proxy streams the
+upstream response without buffering the snapshot, parsing, folding, re-encoding,
+or imposing text/identity negotiation. The engine owns budget enforcement and
+profile conformance. Metrics-gateway admission by metric name does not establish
+semantic conformance.
 
-Native producers must serve Prometheus text exposition (`text/plain; version=0.0.4`).
-The SDK requests that format with `Accept-Encoding: identity` and bounds each
-successful upstream snapshot to **16 MiB**. Compressed responses, malformed
+### Opt-in native folding fallback
+
+Set `FoldNativeMetrics: true` only when the engine cannot enforce its budget.
+This adds per-scrape buffering, parsing, validation, aggregation, and re-encoding
+cost, plus per-run admission state. Only this fallback requires Prometheus text
+exposition (`text/plain; version=0.0.4`): the SDK requests that format with
+`Accept-Encoding: identity` and bounds each successful snapshot to **16 MiB**.
+The following format and validation guarantees apply only with folding enabled.
+Compressed responses, malformed
 exposition, unsafe request-series aggregation, oversized snapshots, and non-200
 2xx responses fail with HTTP 502 and an explanatory error. Upstream non-2xx
 status/body responses are preserved; connection failures return 502. Errors
@@ -99,8 +109,9 @@ components. The base family name is not itself a sample series. Preserve these
 historical names rather than adding `_total` or changing the byte-counter name.
 
 Request labels must be shorter than 1024 bytes in both ingestion modes. Parser
-errors and invalid labels drop the whole result-file event; invalid native
-request labels reject the scrape.
+errors and invalid labels drop the whole result-file event. With native folding
+enabled, invalid request labels reject the scrape; otherwise the engine must
+enforce this contract.
 
 Use lowercase reserved labels `ttft` and `llm_resp` for optional LLM timing.
 The runtime routes `llm_resp` events into the separate wide histogram (its routing
@@ -113,23 +124,37 @@ additional HTTP requests without understanding that adapter's event model.
 ## Request-label budget
 
 The control plane supplies a nonnegative numeric `LabelsUsageLimit` to each
-agent. The SDK enforces it without interpreting tiers: a budget of **N permits
-at most N named request labels plus one overflow label per agent/run**. Zero
-permits only the overflow label; negative budgets are invalid configuration.
-This is not a global plan-wide budget across agents. It does not cap producer
-memory, source-side series, metric-family names, statuses, or other Prometheus
-dimensions. Optional preflight counts provide early feedback only; they do not
-predict or bound the labels that runtime code will emit.
+agent. `MakeAgentServer` reads it from lowercase `label_limit` (default 10).
+The workload inherits `label_limit` from the agent environment, subject to
+`Command.Env` overrides. The SDK does not export `LabelsUsageLimit` or its default
+back into that environment.
+Result-file ingestion and opt-in SDK folding permit **at most N named request
+labels plus one overflow label per agent/run**. In those SDK-managed modes, zero
+permits only overflow. Negative budgets are invalid in every mode.
+Native engines apply the assignment through their own limit configuration;
+default proxying does not enforce it. Explicit `FoldNativeMetrics: true` enables
+SDK enforcement for native engines only as a last-resort fallback.
+
+Replay uses `metrics.max_labels` from its prepared `config.yaml`. Run preparation
+preserves that value rather than rewriting it from `label_limit`; no extra command
+environment override is added. SDK folding stays disabled for Replay. Positive
+budgets use its native limiter and `_other_` overflow; native `max_labels: 0` means
+unlimited. Replay's own configuration and environment precedence remains unchanged.
+
+This is not a global plan-wide budget across agents. SDK folding does not cap
+producer memory, source-side series, metric-family names, statuses, or other
+Prometheus dimensions. Optional preflight counts provide early feedback only;
+they do not predict or bound the labels that runtime code will emit.
 
 Result-file ingestion admits names in event order and folds excess names into
-`others`. Native ingestion sorts newly encountered names within each successful
+`others`. With native folding enabled, the SDK sorts new names within each successful
 scrape before filling remaining slots. Once admitted, a name retains its slot
 for that run, even if it disappears from later scrapes. Rotating names cannot
 reclaim slots. All native request-labelled families use the same mapping, and a
 rejected scrape consumes no admission slots.
 
-Native `AgentServerOptions.NativeMetricsOverflowLabel` defaults to `others`;
-Replay sets it to `_other_`. These are the only supported values. Only the
+For opt-in folding, `AgentServerOptions.NativeMetricsOverflowLabel` defaults to
+`others`; use `_other_` for Replay's convention. These are the only supported values. Only the
 configured overflow name is exempt from the named-label budget; the other
 spelling is an ordinary name. Collisions with an existing overflow series are
 aggregated, not emitted as duplicate series.
@@ -190,9 +215,10 @@ reconstruct vanished source series or repair resets; the producer owns cumulativ
 retention so final summary queries can read the totals directly.
 
 Registry mode retains old-run series for the agent process lifetime and rejects
-late result-file events after run completion. Native admission state survives
-completion so the final upstream snapshot uses the same mapping, and resets on
-the next successful workload launch. A final native scrape still requires a
+late result-file events after run completion. With SDK folding enabled, native
+admission state survives completion so the final upstream snapshot uses the same
+mapping, and resets on the next successful workload launch. In either native mode,
+the engine must enforce cumulative retention. A final native scrape requires a
 reachable producer serving the completed run's cumulative snapshot: the SDK does
 not retain a cached metrics response. Missing final scrapes or undrained result
 rows can affect reported totals.

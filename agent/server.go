@@ -119,7 +119,6 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 		reqOpts:          opts.EngineMeta.makeReqOpts(),
 		logger:           opts.Logger,
 		angentDir:        NewAgentDirHandler(""),
-		labelsByRun:      make(map[string]map[string]struct{}),
 		labelsUsageLimit: opts.LabelsUsageLimit,
 		pubsubClient: pubsub.PubSubClient{
 			Addr:     net.JoinHostPort(opts.EngineMeta.CoordinatorIP, "2416"),
@@ -129,6 +128,9 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 				MinVersion: tls.VersionTLS12,
 			},
 		},
+	}
+	if opts.MetricsURL == "" {
+		as.labelsByRun = make(map[string]map[string]struct{})
 	}
 	return as
 }
@@ -371,7 +373,12 @@ type AgentServerOptions struct {
 	StopTimeout         time.Duration
 	MetricsURL          string
 	NativeMetricsSchema MetricsSchema
-	// NativeMetricsOverflowLabel defaults to "others"; Replay uses "_other_".
+	// FoldNativeMetrics opts into SDK parsing and label folding as a last resort.
+	// By default the native endpoint streams unchanged and the engine must enforce
+	// the numeric label_limit supplied in its workload environment.
+	FoldNativeMetrics bool
+	// NativeMetricsOverflowLabel selects the folding fallback's overflow name.
+	// It defaults to "others"; use "_other_" for Replay's convention.
 	NativeMetricsOverflowLabel string
 	MetricParser               func(string) (ShibuyaMetric, error)
 	ResultFile                 string

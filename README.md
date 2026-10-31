@@ -156,9 +156,18 @@ The callback takes no tier or label-limit input; the host may compare a supplied
 count with its upload policy.
 
 These checks do not grant execution capability, prove runtime cardinality safety,
-or transform content. The SDK independently enforces its runtime distinct-label
-cap, including dynamically named labels. Registration, invocation, upload
-safeguards, mandatory content preparation, and tier policy belong to the host.
+or transform content. The control plane supplies the assigned numeric budget as
+lowercase `label_limit`. Workloads inherit it through the process environment,
+subject to `Command.Env` overrides; the SDK does not rewrite it from `LabelsUsageLimit`.
+Native engines must enforce it themselves; native metrics stream through the SDK
+without parsing or aggregation by default. `AgentServerOptions.FoldNativeMetrics`
+explicitly opts into last-resort SDK folding, with per-scrape buffering and parsing
+cost, text/identity negotiation, a 16 MiB snapshot bound, and validation for safe
+aggregation. Result-file ingestion always enforces the SDK distinct-label budget.
+Both enforcement paths permit N named labels plus one overflow label per agent/run.
+See the [metrics contract](agent/metrics.md) for responsibilities and fallback
+semantics. Registration, invocation, upload safeguards, mandatory content
+preparation, and tier policy belong to the host.
 
 The real [`jsonvalidator.Validate`](examples/jsonvalidator/validation.go) example
 accepts:

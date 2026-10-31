@@ -471,9 +471,11 @@ func (as *AgentServer) finishRunLocked(run *agentRun, err error, phase protocol.
 	run.busy = false
 	run.process = nil
 	run.status.ExitCode = exitCode
-	as.labelsLock.Lock()
-	delete(as.labelsByRun, run.context.RunID)
-	as.labelsLock.Unlock()
+	if as.options.MetricsURL == "" {
+		as.labelsLock.Lock()
+		delete(as.labelsByRun, run.context.RunID)
+		as.labelsLock.Unlock()
+	}
 	switch {
 	case run.failure != nil:
 		err, phase = run.failure, run.failurePhase

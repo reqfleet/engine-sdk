@@ -34,21 +34,26 @@ func (as *AgentServer) metricsHandler() http.Handler {
 		return promhttp.HandlerFor(metricsRegistry(), promhttp.HandlerOpts{})
 	}
 	target, _ := url.Parse(as.options.MetricsURL) // Checked by validateMetricsOptions.
-	return &httputil.ReverseProxy{
+	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			out := r.Out
 			out.Host = target.Host
 			out.URL.Path = target.Path
 			out.URL.RawPath = target.RawPath
-			out.Header.Set("Accept", "text/plain; version=0.0.4")
-			out.Header.Set("Accept-Encoding", "identity")
+			if as.options.FoldNativeMetrics {
+				out.Header.Set("Accept", "text/plain; version=0.0.4")
+				out.Header.Set("Accept-Encoding", "identity")
+			}
 		},
-		ModifyResponse: as.foldNativeMetrics,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			http.Error(w, "native metrics: "+err.Error(), http.StatusBadGateway)
 		},
 	}
+	if as.options.FoldNativeMetrics {
+		proxy.ModifyResponse = as.foldNativeMetrics
+	}
+	return proxy
 }
 
 // Handler returns the authenticated agent HTTP endpoints. Health checks bypass authentication.
