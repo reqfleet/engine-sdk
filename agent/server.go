@@ -375,7 +375,7 @@ type AgentServerOptions struct {
 	NativeMetricsSchema MetricsSchema
 	// FoldNativeMetrics opts into SDK parsing and label folding as a last resort.
 	// By default the native endpoint streams unchanged and the engine must enforce
-	// the numeric label_limit supplied in its workload environment.
+	// its own configured label limit.
 	FoldNativeMetrics bool
 	// NativeMetricsOverflowLabel selects the folding fallback's overflow name.
 	// It defaults to "others"; use "_other_" for Replay's convention.

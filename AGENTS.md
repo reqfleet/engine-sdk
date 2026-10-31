@@ -17,7 +17,7 @@ the engine-specific adapter code and its runnable image.
 | Input artifacts | Serves test scripts, data, optional native config, and dependency declarations selected for the run | Downloads and stages files before the relevant callbacks | Declare expected filenames/formats and consume staged paths; generate engine-local files only where needed |
 | Dependencies | Supplies the declaration, if any, and authorizes the preparation stage | Stages the declaration, invokes the hook, and exposes preparation status | Install, remove, and reconcile dependencies in `PrepareDependencies`, including cancellation and rollback |
 | Lifecycle | Sends prepare/start/stop commands and the stop reason; polls agent status | Coordinator subscription, lifecycle state, command launch, process supervision, and cleanup | Supply `BuildCommand` and any needed preparation, readiness, progress, or graceful-stop hooks |
-| Metrics | Supplies the numeric request-label budget; the collector scrapes the agent; owns tier policy, storage, aggregation, and reporting | Exposes `/metrics`; ingests parsed events with label admission, streams native metrics by default, or folds native snapshots when explicitly enabled | Map engine output to the reporting contract through a parser or normalized native endpoint; enforce native label budgets unless opting into SDK folding; retain native cumulative source series |
+| Metrics | Owns tier policy, storage, aggregation, and reporting; the collector scrapes the agent | Exposes `/metrics`; ingests parsed events with label admission, streams native metrics by default, or folds native snapshots when explicitly enabled | Map engine output to the reporting contract through a parser or normalized native endpoint; enforce configured native label limits unless opting into SDK folding; retain native cumulative source series |
 
 For a new engine, agree the settings schema, artifact/config filenames and
 rendering, dependency format, and image launch requirements with the control-plane
@@ -214,7 +214,7 @@ one of these modes:
   resource metrics, and cumulative request counters/histograms. By default
   (`FoldNativeMetrics: false`), the SDK streams the upstream response without
   parsing, validation, or request-label admission. The native engine must enforce
-  the assigned label budget through its own limit configuration.
+  its configured label limit.
   Set `FoldNativeMetrics: true` only as a last-resort fallback when the engine
   cannot enforce that budget. This adds per-scrape buffering, parsing, validation,
   aggregation, and re-encoding of Prometheus text snapshots. The fallback's
@@ -223,11 +223,17 @@ one of these modes:
 - **Registry only:** leave all metrics options unset. The runtime registry is
   exposed without request-event ingestion; this is not complete request reporting.
 
-The control plane supplies the numeric `LabelsUsageLimit`; the SDK does not decide
-tiers. Result-file ingestion and opt-in SDK folding permit N named request labels
-plus one overflow label per agent/run for a nonnegative budget N; zero folds all
-names in these SDK-managed modes. Default native proxying does not enforce this
-budget; consult the metrics contract for engine-specific limit semantics.
+For upload preflight, your validator returns the optional
+`validation.Result.LabelCount` to the calling control plane through the SDK's
+validation contract. The callback receives no tier or numeric label-limit value;
+the control plane interprets the returned count and owns policy decisions.
+
+Separately, `AgentServerOptions.LabelsUsageLimit` configures runtime admission in
+the agent; it is not a coordinator run assignment or an input to preflight counting.
+Result-file ingestion and opt-in SDK folding permit N named request labels plus
+one overflow label per agent/run for a nonnegative budget N; zero folds all names
+in these SDK-managed modes. Default native proxying does not enforce this budget;
+consult the metrics contract for configuration and engine-specific limit semantics.
 
 With SDK native folding enabled, names keep their slots across scrapes, with
 deterministic admission of new names within a scrape. Rejected scrapes do not

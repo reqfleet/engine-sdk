@@ -75,10 +75,12 @@
 // mapping. See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
 //
-// The control plane supplies a numeric LabelsUsageLimit; the SDK has no tier
-// policy. Workloads inherit the lowercase label_limit environment variable;
-// Command.Env may override it. The SDK does not rewrite it from LabelsUsageLimit.
-// Native engines apply this assignment through their own limit configuration.
+// Runtime label admission uses AgentServerOptions.LabelsUsageLimit, not coordinator
+// run messages. MakeAgentServer reads the lowercase label_limit environment
+// variable (default 10); NewAgentServer uses the option directly. The SDK has no
+// tier policy. Workloads inherit label_limit if present; Command.Env may override
+// it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce
+// their own configured limits.
 // Native proxying streams by default without parsing, format negotiation,
 // validation, or SDK label admission.
 //
@@ -98,7 +100,9 @@
 // This bounds exported request labels, not producer memory, other dimensions, or
 // plan-wide labels across agents. Result-file ingestion and opt-in folding permit
 // N named labels plus one overflow label; zero permits only overflow in these
-// SDK-managed modes. Optional preflight counts do not guarantee runtime cardinality.
+// SDK-managed modes. Upload validators return optional preflight counts to the
+// calling control plane without tier or label-limit inputs; those counts do not
+// guarantee runtime cardinality.
 //
 // [metrics contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md
 package agent

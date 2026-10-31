@@ -40,14 +40,16 @@
 // Unit identifies engine-defined entities, such as "tasks", "test labels", or
 // "request labels". Configured JMeter sampler labels and Locust static task
 // counts are preflight information, not emitted request-label cardinality. The
-// callback takes no tier or label-limit input; the host may compare a supplied
-// count with its upload policy.
+// callback returns any available count to its hosting control-plane caller, which
+// applies upload policy; it accepts no tier or label-limit input.
 //
 // These checks do not grant execution capability, prove runtime cardinality
-// safety, or rewrite artifacts. The SDK independently enforces its runtime
-// distinct-label cap, including dynamically named labels. Registration,
-// invocation, upload safeguards, mandatory content preparation, and tier policy
-// belong to the host, not this package.
+// safety, or rewrite artifacts. SDK result-file ingestion and explicitly enabled
+// native folding (FoldNativeMetrics) enforce the runtime distinct-label cap,
+// including dynamically named labels. Default native proxying streams unchanged
+// without SDK admission; native engines enforce their own configured limits.
+// Registration, invocation, upload safeguards, mandatory content preparation,
+// and tier policy belong to the host, not this package.
 //
 // The public examples/jsonvalidator adapter demonstrates independent checks:
 // counting can run without semantic validation; malformed counting-only input

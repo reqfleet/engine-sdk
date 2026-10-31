@@ -14,7 +14,7 @@ caller-owned; collectors, histogram bounds, and event recording remain in `agent
 | Mode | `AgentServerOptions` | Ownership |
 | --- | --- | --- |
 | Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
-| Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` | The engine enforces the assigned label budget and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
+| Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` | The engine enforces its configured label limit and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
 | Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
 
 In native mode, `ResultFile` may name ordinary workload output. It is never tailed
@@ -77,9 +77,11 @@ integer count, cumulative ordered buckets, and a `+Inf` bucket equal to the coun
 Colliding histograms must have compatible bucket boundaries. Known request
 families must have their declared counter/histogram type and request label;
 status counters must also carry `status`. Duplicate series, missing or duplicate
-histogram components, and numeric aggregation overflow are errors. These checks
-do not replace the producer's responsibility for the profile's exact bounds and
-units. Additional request-labelled counter/histogram families, such as Replay's
+histogram components, and numeric aggregation overflow are errors. Histogram
+component validation covers ordinary and quoted legacy metric names, including
+names inside braces. These checks do not replace the producer's responsibility
+for the profile's exact bounds and units. Additional request-labelled
+counter/histogram families, such as Replay's
 optional schedule-lateness histogram, share the same admission mapping.
 Unlabelled resource families are not folded.
 
@@ -123,16 +125,18 @@ additional HTTP requests without understanding that adapter's event model.
 
 ## Request-label budget
 
-The control plane supplies a nonnegative numeric `LabelsUsageLimit` to each
-agent. `MakeAgentServer` reads it from lowercase `label_limit` (default 10).
-The workload inherits `label_limit` from the agent environment, subject to
-`Command.Env` overrides. The SDK does not export `LabelsUsageLimit` or its default
-back into that environment.
+Runtime admission is configured by the nonnegative
+`AgentServerOptions.LabelsUsageLimit`, not by coordinator run messages or the
+upload-preflight callback. `NewAgentServer` uses that option directly;
+`MakeAgentServer` sets it from the lowercase `label_limit` environment variable
+(default 10). The workload inherits `label_limit` when present in the agent
+environment, subject to `Command.Env` overrides. The SDK does not export
+`LabelsUsageLimit` or its default back into that environment.
 Result-file ingestion and opt-in SDK folding permit **at most N named request
 labels plus one overflow label per agent/run**. In those SDK-managed modes, zero
 permits only overflow. Negative budgets are invalid in every mode.
-Native engines apply the assignment through their own limit configuration;
-default proxying does not enforce it. Explicit `FoldNativeMetrics: true` enables
+Native engines enforce their own configured limits;
+default proxying does not enforce them. Explicit `FoldNativeMetrics: true` enables
 SDK enforcement for native engines only as a last-resort fallback.
 
 Replay uses `metrics.max_labels` from its prepared `config.yaml`. Run preparation
@@ -143,8 +147,11 @@ unlimited. Replay's own configuration and environment precedence remains unchang
 
 This is not a global plan-wide budget across agents. SDK folding does not cap
 producer memory, source-side series, metric-family names, statuses, or other
-Prometheus dimensions. Optional preflight counts provide early feedback only;
-they do not predict or bound the labels that runtime code will emit.
+Prometheus dimensions. Separately, the upload validator returns an optional
+preflight count to the calling control plane; no tier or numeric label-limit value
+is passed into that callback. The control plane applies its upload policy to the
+returned count. These counts provide early feedback only; they do not predict or
+bound the labels that runtime code will emit.
 
 Result-file ingestion admits names in event order and folds excess names into
 `others`. With native folding enabled, the SDK sorts new names within each successful
