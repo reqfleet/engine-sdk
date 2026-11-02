@@ -54,7 +54,7 @@ a new engine with Reqfleet.
 Add the SDK to an adapter's Go module:
 
 ```sh
-go get github.com/reqfleet/engine-sdk@feat-issue-1155-protocol
+go get github.com/reqfleet/engine-sdk@v0.3.1-0.20261102055454-297cf6e11976
 ```
 
 Use the Go toolchain required by `go.mod` for the SDK revision you build; this
@@ -69,15 +69,14 @@ integration, and verification workflow, with links to the detailed contracts.
 
 This revision requires an explicit **wire protocol v1** subscription acknowledgment.
 SDK releases through `v0.3.0` are unversioned and incompatible with this cutover.
-The feature-branch command above resolves a public revision and pins it in your
-module; use the corresponding release tag once released.
+The command above pins the verified public feature-branch revision used by the
+standalone example; use the corresponding release tag once released.
 
 An accepted subscription makes the agent healthy. Unsupported versions are
 rejected before command delivery and remain visible in `/healthz`; they do not
 silently downgrade or retry forever. Deploy matching coordinator and engine
 images together. See the [compatibility contract](protocol/compatibility.md)
 for wire examples, lifecycle behavior, versioning policy, and rollout requirements.
-
 
 ## Platform support
 
@@ -88,9 +87,8 @@ a run also terminates its descendants.
 This checkout also supports Windows `amd64` and `arm64` builds for clients that
 import SDK types and handlers. It does not support Windows agent execution:
 `AgentServer.Run()` returns an error matching `errors.ErrUnsupported` before
-starting workers, coordinator subscriptions, or HTTP listeners. The Windows
-compatibility fix is unreleased; consumers pinned to `v0.1.1` need a release
-containing this fix.
+starting workers, coordinator subscriptions, or HTTP listeners. Consumers pinned
+to older revisions must upgrade to one containing Windows support.
 
 The PR workflow builds both Windows architectures and runs the unsupported
 execution contract tests on a Windows runner. Linux retains the full SDK race
@@ -103,7 +101,7 @@ settings into a run-local curl configuration through `BeforeStart`, then lets
 the SDK launch and supervise curl. Its Docker conformance harness exercises real
 requests, duplicate starts, startup failure, cancellation, and recovery.
 
-The example is an independent module pinned to a released SDK version, so
+The example is an independent module pinned to a public SDK revision, so
 root-level `go test ./...` does not run its harness. The
 [`pr-test` workflow](.github/workflows/pr-test.yml) runs `make test` on pull
 requests, covering both SDK race tests and the Docker conformance harness.

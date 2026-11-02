@@ -1,12 +1,18 @@
 # Public adapter-owned plan preparation
 
 This independent module demonstrates a real curl adapter using only the public
-[`engine-sdk` v0.1.1](https://github.com/reqfleet/engine-sdk/tree/v0.1.1)
+[`engine-sdk` at `297cf6e11976`](https://github.com/reqfleet/engine-sdk/tree/297cf6e119769d26123dc5c8c52b07f1687d0e00)
 `agent` and `protocol` APIs. It has no Shibuya dependency, SDK internal imports,
 workspace requirement, or `replace` directives. Test assertions use public
 `testify`. It demonstrates adapter preparation and the SDK-owned lifecycle, not
 standalone authorization, production engine registration, or a new production
 engine.
+
+The module pins public version `v0.3.1-0.20261102055454-297cf6e11976`, which
+implements wire protocol v1. Its TLS coordinator peer authenticates the
+subscription and explicitly acknowledges that version before sending commands.
+It follows the SDK [compatibility contract](../../protocol/compatibility.md);
+an old unversioned coordinator cannot make this agent ready.
 
 ## Preparation contract
 
@@ -68,7 +74,7 @@ Inputs, temporary files, and results are reset at the next run initialization.
 A completed run's generated file remains available until that reset; it is not
 promised permanent retention or an empty temp directory on completion.
 `Workspace.Config` and `Workspace.State` are reusable locations and are not used
-for generated plans. In SDK v0.1.1 inputs live at `/test-data` independently of
+for generated plans. In this SDK revision inputs live at `/test-data` independently of
 `AGENT_ROOT`; temp and results live under the selected agent root. Preparation
 failure is reported through run-scoped status as failed/startup with exit code
 `-1`; cancellation prevents launch or stops the running process. A coordinator
@@ -85,14 +91,15 @@ GOWORK=off go build ./...
 GOWORK=off go list -tags=integration -deps -test -json ./... |
   jq -e -s 'all(.[]; (.ImportPath | startswith("github.com/reqfleet/shibuya") | not))'
 GOWORK=off go list -m -json all |
-  jq -e -s 'any(.[]; .Path == "github.com/reqfleet/engine-sdk" and .Version == "v0.1.1") and all(.[]; .Replace == null)'
+  jq -e -s 'any(.[]; .Path == "github.com/reqfleet/engine-sdk" and .Version == "v0.3.1-0.20261102055454-297cf6e11976") and all(.[]; .Replace == null)'
 docker build -t engine-sdk-preparing-adapter:local .
 docker run --rm --network bridge engine-sdk-preparing-adapter:local
 ```
 
-This is a separate Go module pinned to the released SDK, not to the parent
-checkout. Root-level `go test ./...` does not include this module. No local
-`replace` or workspace is needed.
+This is a separate Go module pinned to a public SDK feature-branch revision, not
+to the parent checkout. Root-level `go test ./...` does not include this module.
+No local `replace` or workspace is needed. The revision is available from the
+public Go module service; no unreleased local checkout is required.
 
 With Go 1.26.9, Make, and a running Docker daemon, run both the SDK race tests
 and this Docker conformance harness from the repository root:

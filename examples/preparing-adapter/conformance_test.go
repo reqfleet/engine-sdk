@@ -467,10 +467,17 @@ func newProofPeer(t *testing.T, certificate tls.Certificate) *proofPeer {
 		_ = connection.SetReadDeadline(time.Now().Add(proofWait))
 		var topic protocol.Topic
 		decodeErr := json.NewDecoder(connection).Decode(&topic)
-		if decodeErr == nil && (topic.Name != "collection:"+proofCollection || topic.Password != proofKey) {
-			decodeErr = fmt.Errorf("unexpected subscription topic or API key: %+v", topic)
+		if decodeErr == nil && (topic.Name != "collection:"+proofCollection || topic.Password != proofKey ||
+			topic.ProtocolVersion != protocol.WireProtocolVersion) {
+			decodeErr = fmt.Errorf("unexpected subscription identity or protocol version")
 		}
-		_ = connection.SetReadDeadline(time.Time{})
+		if decodeErr == nil {
+			_ = connection.SetWriteDeadline(time.Now().Add(proofWait))
+			decodeErr = json.NewEncoder(connection).Encode(protocol.SubscriptionResponse{
+				Status: protocol.SubscriptionAccepted, ProtocolVersion: protocol.WireProtocolVersion,
+			})
+		}
+		_ = connection.SetDeadline(time.Time{})
 		peer.subscribed <- decodeErr
 	}()
 	t.Cleanup(func() {

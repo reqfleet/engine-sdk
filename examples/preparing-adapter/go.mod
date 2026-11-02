@@ -3,7 +3,7 @@ module example.com/reqfleet/preparing-adapter
 go 1.26.9
 
 require (
-	github.com/reqfleet/engine-sdk v0.1.1
+	github.com/reqfleet/engine-sdk v0.3.1-0.20261102055454-297cf6e11976
 	github.com/stretchr/testify v1.11.1
 )
 
