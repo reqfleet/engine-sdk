@@ -313,8 +313,9 @@ through `Run()`; keep that port on the trusted deployment network:
 
 - `GET /progress` (optionally `?run_id=...`), `GET /prepare-progress`, and
   `GET /metrics` require `Authorization: Bearer <APIKey>`.
-- `GET /healthz` is unauthenticated and reports coordinator subscription state:
-  200 when subscribed, 503 otherwise. It does not report workload readiness.
+- `GET /healthz` is unauthenticated and returns `protocol.AgentHealth` JSON:
+  200 only after protocol admission, 503 otherwise. A permanent compatibility
+  rejection is retained in `error`; it does not report workload readiness.
 
 The coordinator consumes preparation/run status; the Reqfleet metrics collector
 consumes `/metrics`. Your callbacks supply engine observations and metric data,
@@ -358,11 +359,13 @@ engine/coordinator prerequisites; SDK tests alone do not prove an integration.
 
 When changing behavior, update the affected contracts and behavior tests; keep
 project-level explanations in README and adapter instructions here. The Go API,
-`shibuya-v1` metrics profile, and wire behavior are separate contracts. The
-existing wire envelope and subscription are unversioned: there is no protocol
-negotiation or unsupported-version rejection. Review pre-1.0 API changes when
-upgrading a pinned dependency; do not imply that a module version negotiates
-coordinator compatibility.
+`shibuya-v1` metrics profile, and wire protocol v1 are separate contracts. Follow
+the [compatibility contract](protocol/compatibility.md): require explicit
+subscription acceptance, never infer v1 from a missing version, and never
+downgrade silently. Explicit incompatibility stops reconnecting and cancels
+active work through normal cleanup while retaining HTTP diagnostics. Ordinary
+transport outages still reconnect. Review pre-1.0 API changes when upgrading
+the pinned dependency and deploy matching coordinator/agent images together.
 
 ## Releasing the SDK
 

@@ -86,6 +86,9 @@ func (as *AgentServer) queueStart(message *protocol.EngineMessage) error {
 func (as *AgentServer) queueRequest(message *protocol.EngineMessage, verb string) error {
 	as.stateLock.Lock()
 	defer as.stateLock.Unlock()
+	if as.compatibilityFailure != nil {
+		return as.compatibilityFailure
+	}
 	if message == nil || message.RunID == "" {
 		return fmt.Errorf("run ID is missing")
 	}

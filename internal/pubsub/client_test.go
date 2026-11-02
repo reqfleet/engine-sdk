@@ -66,8 +66,8 @@ func decodeTopic(conn net.Conn) error {
 	if err := json.NewDecoder(conn).Decode(&topic); err != nil {
 		return err
 	}
-	if topic.Name != "engine" || topic.Password != "test-key" {
-		return fmt.Errorf("unexpected subscription topic: %q", topic.Name)
+	if topic.Name != "engine" || topic.Password != "test-key" || topic.ProtocolVersion != protocol.WireProtocolVersion {
+		return fmt.Errorf("unexpected subscription topic: %q version %d", topic.Name, topic.ProtocolVersion)
 	}
 	return nil
 }
@@ -81,7 +81,7 @@ func TestSubscribeConsecutiveJSONAndPeerClose(t *testing.T) {
 				if err := decodeTopic(conn); err != nil {
 					return err
 				}
-				_, err := io.WriteString(conn, `{"verb":"start"}{"verb":"stop"}`+ending)
+				_, err := io.WriteString(conn, `{"status":"accepted","protocol_version":1}{"verb":"start"}{"verb":"stop"}`+ending)
 				return err
 			})
 			client := PubSubClient{Addr: listener.Addr().String(), Password: "test-key"}
@@ -107,6 +107,11 @@ func TestSubscribeLocalCloseClosesChannelAndConnection(t *testing.T) {
 	ready := make(chan struct{})
 	done := serveSubscriber(t, listener, func(conn net.Conn) error {
 		if err := decodeTopic(conn); err != nil {
+			return err
+		}
+		if err := json.NewEncoder(conn).Encode(protocol.SubscriptionResponse{
+			Status: protocol.SubscriptionAccepted, ProtocolVersion: protocol.WireProtocolVersion,
+		}); err != nil {
 			return err
 		}
 		close(ready)
@@ -186,6 +191,11 @@ func TestSubscribeVerifiesTLS(t *testing.T) {
 				if err := decodeTopic(conn); err != nil {
 					return err
 				}
+				if err := json.NewEncoder(conn).Encode(protocol.SubscriptionResponse{
+					Status: protocol.SubscriptionAccepted, ProtocolVersion: protocol.WireProtocolVersion,
+				}); err != nil {
+					return err
+				}
 				return json.NewEncoder(conn).Encode(protocol.Payload{Verb: protocol.VerbStart})
 			})
 			client := PubSubClient{
@@ -230,5 +240,123 @@ func TestSubscribeTLSRejectsPlaintextPeer(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, messages)
 	require.Nil(t, conn)
+	awaitSubscriber(t, done)
+}
+
+func TestSubscribeRequiresExplicitAcceptance(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reply     string
+		permanent bool
+	}{
+		{name: "missing"},
+		{name: "command instead of acknowledgement", reply: `{"verb":"start"}`},
+		{name: "malformed JSON", reply: `not-json`},
+		{name: "null", reply: `null`},
+		{name: "unknown status", reply: `{"status":"ok","protocol_version":1}`},
+		{name: "missing version", reply: `{"status":"accepted"}`},
+		{name: "wrong version", reply: `{"status":"accepted","protocol_version":2}`},
+		{name: "accepted with error", reply: `{"status":"accepted","protocol_version":1,"error":{"code":"unsupported_protocol_version"}}`},
+		{name: "unsupported", reply: `{"status":"rejected","error":{"code":"unsupported_protocol_version","message":"agent protocol 1 unsupported; coordinator supports 2","received_version":1,"supported_versions":[2]}}`, permanent: true},
+		{name: "incomplete rejection", reply: `{"status":"rejected","error":{"code":"unsupported_protocol_version"}}`},
+		{name: "contradictory rejection", reply: `{"status":"rejected","error":{"code":"unsupported_protocol_version","message":"unsupported","received_version":1,"supported_versions":[1]}}`},
+		{name: "wrong received version", reply: `{"status":"rejected","error":{"code":"unsupported_protocol_version","message":"unsupported","received_version":0,"supported_versions":[2]}}`},
+		{name: "unversioned support", reply: `{"status":"rejected","error":{"code":"unsupported_protocol_version","message":"unsupported","received_version":1,"supported_versions":[0]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			done := serveSubscriber(t, listener, func(conn net.Conn) error {
+				if err := decodeTopic(conn); err != nil {
+					return err
+				}
+				if tc.reply == "" {
+					return nil
+				}
+				if _, err := io.WriteString(conn, tc.reply+"\n"); err != nil {
+					return err
+				}
+				var b [1]byte
+				_, err := conn.Read(b[:])
+				if !errors.Is(err, io.EOF) {
+					return fmt.Errorf("failed handshake did not close connection: %v", err)
+				}
+				return nil
+			})
+			client := PubSubClient{Addr: listener.Addr().String(), Password: "test-key"}
+			messages, conn, err := client.Subscribe("engine", func() protocol.Message { return &protocol.Payload{} })
+			require.Error(t, err)
+			require.Nil(t, messages)
+			require.Nil(t, conn)
+			var rejection *protocol.ProtocolError
+			require.Equal(t, tc.permanent, errors.As(err, &rejection))
+			if tc.permanent {
+				require.Equal(t, protocol.UnsupportedProtocolVersion, rejection.Code)
+				require.Equal(t, protocol.WireProtocolVersion, rejection.ReceivedVersion)
+				require.Equal(t, []int{2}, rejection.SupportedVersions)
+			}
+			awaitSubscriber(t, done)
+		})
+	}
+}
+
+func TestSubscribeAcknowledgementDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	done := serveSubscriber(t, listener, func(conn net.Conn) error {
+		if err := conn.SetDeadline(time.Now().Add(7 * time.Second)); err != nil {
+			return err
+		}
+		if err := decodeTopic(conn); err != nil {
+			return err
+		}
+		var b [1]byte
+		_, err := conn.Read(b[:])
+		if !errors.Is(err, io.EOF) {
+			return fmt.Errorf("timed out handshake did not close connection: %v", err)
+		}
+		return nil
+	})
+	client := PubSubClient{Addr: listener.Addr().String(), Password: "test-key"}
+	messages, conn, err := client.Subscribe("engine", func() protocol.Message { return &protocol.Payload{} })
+	var timeout net.Error
+	require.ErrorAs(t, err, &timeout)
+	require.True(t, timeout.Timeout())
+	require.Nil(t, messages)
+	require.Nil(t, conn)
+	awaitSubscriber(t, done)
+}
+
+func TestSubscribeClearsAcknowledgementDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	done := serveSubscriber(t, listener, func(conn net.Conn) error {
+		if err := conn.SetDeadline(time.Now().Add(8 * time.Second)); err != nil {
+			return err
+		}
+		if err := decodeTopic(conn); err != nil {
+			return err
+		}
+		if err := json.NewEncoder(conn).Encode(protocol.SubscriptionResponse{
+			Status: protocol.SubscriptionAccepted, ProtocolVersion: protocol.WireProtocolVersion,
+		}); err != nil {
+			return err
+		}
+		time.Sleep(5500 * time.Millisecond)
+		return json.NewEncoder(conn).Encode(protocol.Payload{Verb: protocol.VerbStart})
+	})
+	client := PubSubClient{Addr: listener.Addr().String(), Password: "test-key"}
+	messages, conn, err := client.Subscribe("engine", func() protocol.Message { return &protocol.Payload{} })
+	require.NoError(t, err)
+	defer conn.Close()
+	select {
+	case message, ok := <-messages:
+		require.True(t, ok, "command stream retained its handshake deadline")
+		require.Equal(t, protocol.VerbStart, message.(*protocol.Payload).Verb)
+	case <-time.After(7 * time.Second):
+		t.Fatal("command did not arrive after the handshake deadline")
+	}
+	_, ok := nextMessage(t, messages)
+	require.False(t, ok)
 	awaitSubscriber(t, done)
 }

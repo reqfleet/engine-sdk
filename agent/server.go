@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -83,9 +84,9 @@ type AgentServer struct {
 	nativeMetricsRun  string
 	nativeLabels      map[string]struct{}
 
-	// Subscription status
-	subStausMu            sync.RWMutex
+	// Subscription status is protected by stateLock, alongside command admission.
 	coordinatorSubscribed bool
+	compatibilityFailure  *protocol.ProtocolError
 
 	// Cold fields - initialization only, rarely accessed after setup
 	cdrclient    *coordinator.Client
@@ -257,13 +258,25 @@ func (as *AgentServer) reportOwnMetrics(interval time.Duration) error {
 }
 
 func (as *AgentServer) SubscribeToCoordinator() (chan protocol.Message, error) {
+	as.stateLock.RLock()
+	failure := as.compatibilityFailure
+	as.stateLock.RUnlock()
+	if failure != nil {
+		return nil, failure
+	}
 	collectionID := as.options.EngineMeta.CollectionID
 	msgChan, _, err := as.pubsubClient.Subscribe(fmt.Sprintf("collection:%s", collectionID), func() protocol.Message {
 		return &protocol.Payload{}
 	})
 	if err != nil {
+		as.updateSubStatus(false)
+		var failure *protocol.ProtocolError
+		if errors.As(err, &failure) {
+			as.rejectProtocol(failure)
+		}
 		return nil, err
 	}
+	as.updateSubStatus(true)
 	as.logger.Infof("Subscribe to coordinator at %s", as.reqOpts.Endpoint)
 	return msgChan, nil
 }
@@ -313,6 +326,7 @@ func upsertEnv(env []string, key, value string) []string {
 }
 
 func (as *AgentServer) listenToCoordinator(msgChan chan protocol.Message) {
+	defer as.updateSubStatus(false)
 	engineMeta := as.options.EngineMeta
 	for msg := range msgChan {
 		pl := msg.(*protocol.Payload)
@@ -430,15 +444,49 @@ func MakeAgentServer(options AgentServerOptions) *AgentServer {
 }
 
 func (as *AgentServer) updateSubStatus(subscribed bool) {
-	as.subStausMu.Lock()
-	defer as.subStausMu.Unlock()
-	as.coordinatorSubscribed = subscribed
+	as.stateLock.Lock()
+	defer as.stateLock.Unlock()
+	as.coordinatorSubscribed = subscribed && as.compatibilityFailure == nil
+}
+
+func (as *AgentServer) health() protocol.AgentHealth {
+	as.stateLock.RLock()
+	defer as.stateLock.RUnlock()
+	return protocol.AgentHealth{
+		Subscribed:      as.coordinatorSubscribed,
+		ProtocolVersion: protocol.WireProtocolVersion,
+		Error:           as.compatibilityFailure,
+	}
 }
 
 func (as *AgentServer) isSubscribed() bool {
-	as.subStausMu.RLock()
-	defer as.subStausMu.RUnlock()
-	return as.coordinatorSubscribed
+	return as.health().Subscribed
+}
+
+func (as *AgentServer) rejectProtocol(failure *protocol.ProtocolError) {
+	as.stateLock.Lock()
+	defer as.stateLock.Unlock()
+	as.coordinatorSubscribed = false
+	if as.compatibilityFailure != nil {
+		return
+	}
+	as.compatibilityFailure = failure
+	run := as.runtime.run
+	if run == nil || run.status.State.Terminal() {
+		return
+	}
+	run.failure = failure
+	run.failurePhase = protocol.FailureStartup
+	if run.status.State == protocol.RunPreparing || run.status.State == protocol.RunPrepared {
+		run.failurePhase = protocol.FailurePreparation
+	} else if run.launched {
+		run.failurePhase = protocol.FailureExecution
+	}
+	run.status.State = protocol.RunStopping
+	run.cancel()
+	if !run.busy {
+		as.finishRunLocked(run, failure, run.failurePhase, -1)
+	}
 }
 
 func (as *AgentServer) validateMetricsOptions() error {

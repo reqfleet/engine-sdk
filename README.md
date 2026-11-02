@@ -54,7 +54,7 @@ a new engine with Reqfleet.
 Add the SDK to an adapter's Go module:
 
 ```sh
-go get github.com/reqfleet/engine-sdk@v0.1.1
+go get github.com/reqfleet/engine-sdk@feat-issue-1155-protocol
 ```
 
 Use the Go toolchain required by `go.mod` for the SDK revision you build; this
@@ -64,6 +64,20 @@ review compatibility when upgrading: the Go API is pre-1.0.
 For adapter development, start with [AGENTS.md](AGENTS.md). It covers the public
 packages, callback lifecycle, configuration, workspace ownership, metrics
 integration, and verification workflow, with links to the detailed contracts.
+
+## Wire compatibility
+
+This revision requires an explicit **wire protocol v1** subscription acknowledgment.
+SDK releases through `v0.3.0` are unversioned and incompatible with this cutover.
+The feature-branch command above resolves a public revision and pins it in your
+module; use the corresponding release tag once released.
+
+An accepted subscription makes the agent healthy. Unsupported versions are
+rejected before command delivery and remain visible in `/healthz`; they do not
+silently downgrade or retry forever. Deploy matching coordinator and engine
+images together. See the [compatibility contract](protocol/compatibility.md)
+for wire examples, lifecycle behavior, versioning policy, and rollout requirements.
+
 
 ## Platform support
 

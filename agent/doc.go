@@ -20,6 +20,13 @@
 // Materialized input has already been partitioned; native input requires the
 // engine to apply the exact supplied shard. Replicated input is consumed whole.
 //
+// Subscription requires explicit acceptance of protocol.WireProtocolVersion.
+// Missing or unsupported versions never admit work. Health reflects the accepted
+// connection and clears on disconnection. A permanent incompatibility stops
+// reconnecting, rejects further work, and cancels any active preparation/process
+// through normal cleanup; HTTP health retains the error until process restart.
+// Ordinary transport failures keep reconnecting. See protocol/compatibility.md.
+//
 // # Callback order and ownership
 //
 // PrepareDependencies receives the staged dependency declaration, if any. An

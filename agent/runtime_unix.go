@@ -32,21 +32,25 @@ func (as *AgentServer) Run() error {
 		}
 	}()
 	go as.runRequestWorker(context.Background())
-	go func() {
-		for {
-			time.Sleep(2 * time.Second)
-			msgChan, err := as.SubscribeToCoordinator()
-			if err != nil {
-				options.Logger.Error(err)
-				as.updateSubStatus(false)
-				continue
-			}
-			as.updateSubStatus(true)
-			as.listenToCoordinator(msgChan)
-		}
-	}()
+	go as.subscribeToCoordinator()
 	go as.handleMetricStream()
 	return as.startHTTPServer()
+}
+
+func (as *AgentServer) subscribeToCoordinator() {
+	for {
+		time.Sleep(2 * time.Second)
+		msgChan, err := as.SubscribeToCoordinator()
+		if err != nil {
+			as.logger.Error(err)
+			var failure *protocol.ProtocolError
+			if errors.As(err, &failure) {
+				return
+			}
+			continue
+		}
+		as.listenToCoordinator(msgChan)
+	}
 }
 
 func (as *AgentServer) runCommand(run *agentRun) error {

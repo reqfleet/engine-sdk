@@ -63,11 +63,14 @@ func (as *AgentServer) Handler() http.Handler {
 	mux.HandleFunc("GET /prepare-progress", as.handlePreparationCheck)
 	mux.Handle("GET /metrics", as.metricsHandler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if as.isSubscribed() {
+		health := as.health()
+		w.Header().Set("Content-Type", "application/json")
+		if health.Subscribed {
 			w.WriteHeader(http.StatusOK)
-			return
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		http.Error(w, "not subscribed to coordinator", http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(health)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {

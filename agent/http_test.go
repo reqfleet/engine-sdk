@@ -155,7 +155,10 @@ func TestHandlerAuthentication(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
-	assert.Equal(t, "not subscribed to coordinator\n", response.Body.String())
+	assert.Equal(t, "application/json", response.Header().Get("Content-Type"))
+	var health protocol.AgentHealth
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &health))
+	assert.Equal(t, protocol.AgentHealth{ProtocolVersion: protocol.WireProtocolVersion}, health)
 }
 
 func TestNativeMetricsProxyPreservesTargetAndFailure(t *testing.T) {
