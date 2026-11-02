@@ -65,6 +65,24 @@ For adapter development, start with [AGENTS.md](AGENTS.md). It covers the public
 packages, callback lifecycle, configuration, workspace ownership, metrics
 integration, and verification workflow, with links to the detailed contracts.
 
+## Coordinator backward compatibility
+
+The coordinator **MUST ALWAYS maintain backward compatibility with existing
+engines** built against previously released SDK contracts. A coordinator upgrade
+MUST NOT require those engine images to be rebuilt, upgraded, or re-registered
+just to preserve their existing behavior.
+
+This obligation covers subscriptions, command payloads and their meanings,
+artifact/settings delivery, lifecycle/status behavior, and metrics/reporting
+contracts. Additions must remain safe for older engines that do not understand
+them; changing a field's meaning or making a new field mandatory is not compatible.
+Verify coordinator releases against older engine images as well as current ones.
+
+This guarantee is directional: new engine features may require a newer
+coordinator. It is also separate from source compatibility when an adapter
+upgrades its Go SDK dependency. The current wire envelope and subscription are
+unversioned; the SDK module version does not negotiate communication compatibility.
+
 ## Platform support
 
 Deployed agents require Linux containers, including writable workspace paths and
