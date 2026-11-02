@@ -364,6 +364,13 @@ negotiation or unsupported-version rejection. Review pre-1.0 API changes when
 upgrading a pinned dependency; do not imply that a module version negotiates
 coordinator compatibility.
 
+Coordinators **MUST ALWAYS maintain backward compatibility with existing engines**,
+as defined by the [coordinator compatibility policy](README.md#coordinator-backward-compatibility).
+Before releasing coordinator changes, verify older engine images as well as
+current ones, including payload semantics, artifact/settings delivery, preparation,
+execution, metrics/reporting, completion, and cancellation. Do not require an
+engine rebuild, upgrade, or re-registration merely because the coordinator changes.
+
 ## Releasing the SDK
 
 The [`release-please` workflow](.github/workflows/release-please.yml) runs on
