@@ -454,6 +454,9 @@ negotiation or unsupported-version rejection. Review pre-1.0 API changes when
 upgrading a pinned dependency; do not imply that a module version negotiates
 coordinator compatibility.
 
+Do not manually update `CHANGELOG.md` for code or documentation changes.
+Release Please manages changelog updates in its release PRs.
+
 Coordinators **MUST ALWAYS maintain backward compatibility with existing engines**,
 as defined by the [coordinator compatibility policy](README.md#coordinator-backward-compatibility).
 Before releasing coordinator changes, verify older engine images as well as
