@@ -13,13 +13,19 @@ caller-owned; collectors, histogram bounds, and event recording remain in `agent
 
 | Mode | `AgentServerOptions` | Ownership |
 | --- | --- | --- |
-| Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
-| Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` | The engine enforces its configured label limit and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
+| Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsHandler` nil, `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
+| In-process normalized handler | Non-nil `MetricsHandler`, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser`, empty `MetricsURL` | The adapter owns normalization, label limits, and exporter state; the SDK serves the handler directly behind its existing authentication. Folding options are not supported. |
+| Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` and `MetricsHandler` | The engine enforces its configured label limit and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
 | Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
 
-In native mode, `ResultFile` may name ordinary workload output. It is never tailed
-for metrics. In registry mode, `ResultFile` and `MetricParser` must be paired.
-Setting `MetricsURL` selects native mode; a native endpoint cannot also use a parser.
+With `MetricsHandler` or `MetricsURL`, `ResultFile` may name ordinary workload
+output, such as k6 CSV. The SDK does not tail it for metrics or require a parser.
+Without either native source, `ResultFile` and `MetricParser` must be paired.
+`MetricsHandler`, `MetricsURL`, and `MetricParser` are mutually exclusive.
+`FoldNativeMetrics: true` and any nonempty `NativeMetricsOverflowLabel` require
+`MetricsURL`; they are rejected with a handler, result-file events, or registry only.
+For URL-backed metrics, a valid overflow label may be configured with folding
+disabled, but has no effect until folding is enabled.
 
 `Run` rejects invalid options before starting background work. Direct use of the
 metrics HTTP handler returns 503 for the same invalid configuration. Validation
@@ -28,7 +34,9 @@ identify the remedy:
 
 - `metrics label limit must be nonnegative`
 - `result-file metrics require both ResultFile and MetricParser`
-- `native metrics schema requires MetricsURL`
+- `native metrics schema requires MetricsURL or MetricsHandler`
+- `native metrics cannot configure both MetricsHandler and MetricsURL`
+- `FoldNativeMetrics and NativeMetricsOverflowLabel require MetricsURL`
 - `native metrics cannot also configure MetricParser`
 - `unsupported native metrics schema %q; require shibuya-v1 from an adapter-normalized endpoint`
 - `native metrics overflow label must be others or _other_`
@@ -43,9 +51,9 @@ accumulates those events into the Prometheus metrics required by the control pla
 If an engine exposes Prometheus metrics with a different schema, provide an
 adapter-owned endpoint that normalizes them to `shibuya-v1`, or use per-request
 result events with a `MetricParser`. The schema declaration is the producer's
-promise that its endpoint follows this contract. With `FoldNativeMetrics: true`,
-the runtime checks what is needed for safe folding; neither mode is a complete
-profile-conformance validator.
+promise that its handler or endpoint follows this contract. With
+`FoldNativeMetrics: true`, the runtime checks what is needed for safe folding;
+none of these modes is a complete profile-conformance validator.
 
 When `MetricsURL` is set, each scrape of the agent's `/metrics` endpoint is
 forwarded to that URL. The engine or adapter supplies the identity labels, metric
@@ -55,6 +63,29 @@ upstream response without buffering the snapshot, parsing, folding, re-encoding,
 or imposing text/identity negotiation. The engine owns budget enforcement and
 profile conformance. Metrics-gateway admission by metric name does not establish
 semantic conformance.
+
+### In-process exporter ownership
+
+`MetricsHandler` is an `http.Handler` mounted at the SDK's existing authenticated
+`GET /metrics` route. Missing, malformed, or incorrect bearer credentials are
+rejected before the handler is invoked. The handler receives the incoming request
+and response writer directly, including request context values, deadlines, and
+cancellation. Its status, headers, and body are served unchanged, including error
+responses. There is no additional adapter listener, HTTP proxy hop, snapshot
+buffer, parsing, label folding, or merge with the SDK registry.
+
+The adapter must supply the complete normalized exposition, including identity
+labels and resource metrics, and enforce its configured label budget. It owns
+CSV/result parsing, cumulative metrics, per-run identity/state transitions, and
+exporter shutdown. Synchronize updates against concurrent scrapes and honor
+request cancellation. A scrape can arrive before a run, during execution, or
+after completion; retain the completed run's cumulative snapshot for final
+scrapes. The SDK neither resets nor closes the supplied handler and does not
+cache responses. `Run()` still owns the HTTP listener and server lifecycle.
+
+See the [in-process exporter example](../AGENTS.md#resolve-deployment-options-before-construction)
+for constructing the handler from resolved deployment options without a second
+listener.
 
 ### Opt-in native folding fallback
 
@@ -93,8 +124,9 @@ Every series carries identity labels
 Result parsers supply request values. The runtime overwrites `ShibuyaMetric`'s
 collection, plan, run, engine, and zone with the assigned run's identity before
 recording the event. Native adapters must supply these labels themselves, using
-the runtime's same-named workload environment variables. Parser identity injection
-and native proxying are not interchangeable.
+resolved `EngineMeta` and callback `RunContext.RunID` for an in-process exporter,
+or the runtime's same-named workload environment variables for an external
+producer. Parser identity injection and native exposition are not interchangeable.
 
 | Historical family name | Type | Unit and meaning | Labels |
 | --- | --- | --- | --- |
@@ -140,9 +172,10 @@ or its default back into that environment.
 Result-file ingestion and opt-in SDK folding permit **at most N named request
 labels plus one overflow label per agent/run**. In those SDK-managed modes, zero
 permits only overflow. Negative budgets are invalid in every mode.
-Native engines enforce their own configured limits;
-default proxying does not enforce them. Explicit `FoldNativeMetrics: true` enables
-SDK enforcement for native engines only as a last-resort fallback.
+Native engines and in-process exporters enforce their own configured limits;
+default proxying and `MetricsHandler` do not enforce them. Explicit
+`FoldNativeMetrics: true` enables SDK enforcement only for URL-backed native
+engines as a last-resort fallback.
 
 Replay uses `metrics.max_labels` from its prepared `config.yaml`. Run preparation
 preserves that value rather than rewriting it from `label_limit`; no extra command
@@ -229,11 +262,11 @@ retention so final summary queries can read the totals directly.
 Registry mode retains old-run series for the agent process lifetime and rejects
 late result-file events after run completion. With SDK folding enabled, native
 admission state survives completion so the final upstream snapshot uses the same
-mapping, and resets on the next successful workload launch. In either native mode,
-the engine must enforce cumulative retention. A final native scrape requires a
-reachable producer serving the completed run's cumulative snapshot: the SDK does
-not retain a cached metrics response. Missing final scrapes or undrained result
-rows can affect reported totals.
+mapping, and resets on the next successful workload launch. In all native modes,
+the producer must enforce cumulative retention. A final native scrape requires
+a reachable endpoint or handler serving the completed run's cumulative snapshot:
+the SDK does not retain a cached metrics response. Missing final scrapes or
+undrained result rows can affect reported totals.
 
 Apply the selected collection/run/plan/label/zone filters to these formulas:
 
@@ -257,8 +290,8 @@ omitted. Existing error charts classify non-2xx/non-3xx statuses as errors.
 In addition to the engine's request metrics, `github.com/reqfleet/engine-sdk/agent` automatically collects
 runtime CPU and memory usage. In result-file mode, it exposes these as
 `shibuya_cpu_gauge` (CPU cores) and `shibuya_mem_gauge` (bytes) alongside the parsed
-request metrics. Native endpoints provide these resource metrics in their own
-Prometheus exposition.
+request metrics. Native endpoints and in-process handlers provide these resource
+metrics in their own Prometheus exposition; the SDK does not merge its registry.
 
 ## Explicit adapter mapping examples
 
@@ -312,7 +345,7 @@ renaming coarse buckets, summaries, or percentiles.
 ## Implementation references
 
 - [Agent options, validation, and ingestion](server.go)
-- [Registry and native reverse proxy](http.go)
+- [Registry, in-process handler, and native reverse proxy](http.go)
 - [Native label admission and snapshot folding](metrics_native.go)
 - [Public metric event and producer definitions](metrics.go)
 - [Producer histogram regression tests](metrics_producer_test.go)

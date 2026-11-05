@@ -17,7 +17,7 @@ the engine-specific adapter code and its runnable image.
 | Input artifacts | Serves test scripts, data, optional native config, and dependency declarations selected for the run | Downloads and stages files before the relevant callbacks | Declare expected filenames/formats and consume staged paths; generate engine-local files only where needed |
 | Dependencies | Supplies the declaration, if any, and authorizes the preparation stage | Stages the declaration, invokes the hook, and exposes preparation status | Install, remove, and reconcile dependencies in `PrepareDependencies`, including cancellation and rollback |
 | Lifecycle | Sends prepare/start/stop commands and the stop reason; polls agent status | Coordinator subscription, lifecycle state, command launch, process supervision, and cleanup | Supply `BuildCommand` and any needed preparation, readiness, progress, or graceful-stop hooks |
-| Metrics | Owns tier policy, storage, aggregation, and reporting; the collector scrapes the agent | Exposes `/metrics`; ingests parsed events with label admission, streams native metrics by default, or folds native snapshots when explicitly enabled | Map engine output to the reporting contract through a parser or normalized native endpoint; enforce configured native label limits unless opting into SDK folding; retain native cumulative source series |
+| Metrics | Owns tier policy, storage, aggregation, and reporting; the collector scrapes the agent | Exposes `/metrics`; ingests parsed events with label admission, serves an in-process handler, proxies native metrics, or folds URL-backed snapshots when explicitly enabled | Map engine output to the reporting contract through a parser, normalized handler, or native endpoint; enforce configured native label limits unless opting into SDK folding; retain native cumulative source series |
 
 For a new engine, agree the settings schema, artifact/config filenames and
 rendering, dependency format, and image launch requirements with the control-plane
@@ -111,35 +111,46 @@ does not reread these environment settings or replace a zero label limit.
 `agent.MakeAgentServer` uses the same loader, but retains fatal logging on errors;
 do not pass already-resolved options through it.
 
-For example, this adapter-owned helper initializes a native exporter from the
-resolved budget, then constructs the SDK server from the same options:
+For example, this adapter-owned helper initializes an in-process exporter from
+the resolved budget, then constructs the SDK server from the same options.
+`http.Handler` is from `net/http`; no second listener or HTTP server is needed:
 
 ```go
-func newNativeAgent(
+func newHandlerAgent(
     base agent.AgentServerOptions,
-    startExporter func(labelLimit int) (metricsURL string, err error),
+    newExporter func(labelLimit int) (http.Handler, error),
 ) (*agent.AgentServer, error) {
     options, err := agent.LoadAgentServerOptions(base)
     if err != nil {
         return nil, err
     }
-    metricsURL, err := startExporter(options.LabelsUsageLimit)
+    exporter, err := newExporter(options.LabelsUsageLimit)
     if err != nil {
         return nil, err
     }
-    options.MetricsURL = metricsURL
+    options.MetricsHandler = exporter
     options.NativeMetricsSchema = agent.MetricsSchemaShibuyaV1
-    options.FoldNativeMetrics = false
     return agent.NewAgentServer(options), nil
 }
 ```
 
-Supply `BuildCommand` and other adapter hooks in `base`, with `MetricParser` nil.
-`startExporter` is your adapter's initializer, not an SDK callback: it must
-initialize the real exporter, enforce its configured label budget, and return
-the URL of its normalized endpoint conforming to [the metrics contract](agent/metrics.md).
-The adapter owns exporter shutdown and handles errors from the returned server's
-`Run()` method. No local `label_limit` lookup or parser is needed.
+Supply `BuildCommand` and other adapter hooks in `base`, with `MetricParser` nil,
+`MetricsURL` and `NativeMetricsOverflowLabel` empty, and `FoldNativeMetrics` false.
+Set `base.ResultFile` to `"results.csv"` when the workload still writes CSV, and
+configure the engine to write to `RunContext.ResultFile`. The SDK supplies that
+path but does not tail the file in handler mode.
+
+`newExporter` is your adapter's initializer, not an SDK callback. It must return
+the real normalized exporter conforming to [the metrics contract](agent/metrics.md)
+and enforce the resolved label budget. If the exporter needs identity at
+construction, also pass the resolved `options.EngineMeta`; update run identity
+from callback `RunContext.RunID`. The adapter owns CSV parsing, normalization,
+synchronized run-local state, and exporter shutdown, including when `Run()`
+returns an error. The SDK owns its listener and server lifecycle, not the
+exporter's workers or state. Preserve completed-run cumulative metrics for final
+scrapes, and honor the incoming scrape context. No local `label_limit` parser is
+needed. An existing normalized `http.Handler` can be assigned directly to
+`options.MetricsHandler`; do not wrap it in another server or `MetricsURL`.
 
 ## Implement an adapter
 
@@ -162,9 +173,10 @@ artifacts yourself.
   remote declaration; the SDK supplies `RunContext.DependencyFile`, or an empty
   string if none was supplied. Neither the control plane nor the SDK implements
   the engine-specific installation logic in your container.
-- `ResultFile`: you choose a local output name for result-file metrics and
-  configure the engine to write to `RunContext.ResultFile`. This is output
-  produced by the engine, not an artifact supplied by the control plane.
+- `ResultFile`: you choose a local output name and configure the engine to write
+  to `RunContext.ResultFile`. With `MetricParser`, the SDK ingests its events;
+  with `MetricsHandler` or `MetricsURL`, it remains ordinary workload output.
+  This is produced by the engine, not an artifact supplied by the control plane.
 
 Use filenames, not paths, for these options; the SDK uses their basenames for
 local staging. Callback paths are absolute. Use `RunContext.Workspace` instead
@@ -267,14 +279,23 @@ does not push metrics to the coordinator or implement reporting/storage. Choose
 one of these modes:
 
 - **Result-file events:** set both `ResultFile` and `MetricParser`; leave
-  `MetricsURL` and `NativeMetricsSchema` empty. The SDK tails the output file.
+  `MetricsHandler` nil, `MetricsURL` and `NativeMetricsSchema` empty. The SDK tails the output file.
   Each parser call receives a line and returns `agent.ShibuyaMetric` or an error.
   Map request label, status, latency in milliseconds, received bytes into
   `EgressBytes`, and current concurrency into `Threads`. The runtime supplies
   run identity and accumulates metrics; parser errors drop the event. Never
   feed cumulative snapshots into a per-request event parser.
+- **In-process normalized handler:** set `MetricsHandler` to the adapter's
+  `http.Handler` and `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`; leave
+  `MetricParser` nil and `MetricsURL` empty. The SDK invokes it directly at the
+  existing authenticated `/metrics` route with the incoming request context and
+  preserves status, headers, and body, including errors. It does not parse,
+  aggregate, or merge output with its registry. The exporter supplies the complete
+  normalized exposition and enforces its label budget. `ResultFile` may still
+  name CSV or other workload output. `FoldNativeMetrics` must be false and
+  `NativeMetricsOverflowLabel` empty; both folding options require `MetricsURL`.
 - **Normalized native endpoint:** set an HTTP(S) `MetricsURL` and
-  `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`; leave `MetricParser` nil.
+  `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`; leave `MetricParser` and `MetricsHandler` nil.
   Supply a complete normalized exposition with compatible identity labels,
   resource metrics, and cumulative request counters/histograms. By default
   (`FoldNativeMetrics: false`), the SDK streams the upstream response without
@@ -297,26 +318,28 @@ Separately, `AgentServerOptions.LabelsUsageLimit` configures runtime admission i
 the agent; it is not a coordinator run assignment or an input to preflight counting.
 Result-file ingestion and opt-in SDK folding permit N named request labels plus
 one overflow label per agent/run for a nonnegative budget N; zero folds all names
-in these SDK-managed modes. Default native proxying does not enforce this budget;
-consult the metrics contract for configuration and engine-specific limit semantics.
+in these SDK-managed modes. Default native proxying and in-process handlers do
+not enforce this budget; consult the metrics contract for configuration and
+engine-specific limit semantics.
 
 With SDK native folding enabled, names keep their slots across scrapes, with
 deterministic admission of new names within a scrape. Rejected scrapes do not
 consume slots. Folding sums each current cumulative snapshot, not deltas or
 previously scraped values. Admission survives completion and resets on the next
-successful launch. In either native mode, preserve cumulative source series
-throughout a run; the final scrape still requires a reachable producer. SDK
+successful launch. In all native modes, preserve cumulative source series
+throughout a run; the final scrape still requires a reachable endpoint or handler. SDK
 folding bounds exported request labels, not producer memory, other Prometheus
 dimensions, or global plan-wide cardinality. An exact preflight count is not a
 guarantee of runtime labels.
 
 An arbitrary Prometheus endpoint is not automatically compatible. Declaring
-`shibuya-v1` promises conformance; neither mode is a complete profile validator.
+`shibuya-v1` promises conformance; no mode is a complete profile validator.
 Only with `FoldNativeMetrics: true` does the SDK check safe folding and limit
 successful snapshots to 16 MiB of uncompressed Prometheus text. In that fallback,
 malformed, unsafe, or oversized snapshots return HTTP 502 rather than passing
-through. Default native proxying imposes neither this size bound nor these
-validation checks. Upstream failures are not replaced with empty or cached metrics.
+through. Default native proxying and in-process handlers impose neither this size
+bound nor these validation checks. Producer failures are not replaced with empty
+or cached metrics.
 Use [the metrics contract](agent/metrics.md) for the full format, aggregation,
 error, and lifecycle rules. Use `metricschema` definitions rather than private
 collectors or copied metric-name strings. Its label-list functions return

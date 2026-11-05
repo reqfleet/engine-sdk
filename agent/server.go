@@ -133,7 +133,7 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 			},
 		},
 	}
-	if opts.MetricsURL == "" {
+	if opts.MetricsURL == "" && opts.MetricsHandler == nil {
 		as.labelsByRun = make(map[string]map[string]struct{})
 	}
 	return as
@@ -375,14 +375,26 @@ type AgentServerOptions struct {
 	Progress            func(context.Context, RunContext) (protocol.Progress, error)
 	Stop                func(context.Context, RunContext, Process) error
 	StopTimeout         time.Duration
-	MetricsURL          string
+	// MetricsURL proxies an external normalized endpoint; it cannot be combined
+	// with MetricsHandler or MetricParser.
+	MetricsURL string
+	// MetricsHandler serves normalized metrics directly at the authenticated
+	// GET /metrics route, using the incoming request and response writer.
+	// It requires NativeMetricsSchema and cannot be combined with MetricsURL,
+	// MetricParser, FoldNativeMetrics, or NativeMetricsOverflowLabel.
+	// ResultFile may still name workload output; the SDK does not tail it.
+	// The adapter owns normalization, label limits, concurrent access, run-local
+	// state, and exporter shutdown. The SDK owns the HTTP listener and does not
+	// parse, merge, cache, or close the handler's output or state.
+	MetricsHandler http.Handler
+	// NativeMetricsSchema declares the profile supplied by MetricsURL or MetricsHandler.
 	NativeMetricsSchema MetricsSchema
-	// FoldNativeMetrics opts into SDK parsing and label folding as a last resort.
-	// By default the native endpoint streams unchanged and the engine must enforce
-	// its own configured label limit.
+	// FoldNativeMetrics opts into SDK parsing and label folding for MetricsURL
+	// as a last resort. It requires MetricsURL. By default the native endpoint
+	// streams unchanged and the engine must enforce its own configured label limit.
 	FoldNativeMetrics bool
 	// NativeMetricsOverflowLabel selects the folding fallback's overflow name.
-	// It defaults to "others"; use "_other_" for Replay's convention.
+	// It requires MetricsURL and defaults to "others"; use "_other_" for Replay's convention.
 	NativeMetricsOverflowLabel string
 	MetricParser               func(string) (ShibuyaMetric, error)
 	ResultFile                 string
@@ -490,9 +502,15 @@ func (as *AgentServer) validateMetricsOptions() error {
 	if options.LabelsUsageLimit < 0 {
 		return fmt.Errorf("metrics label limit must be nonnegative")
 	}
-	if options.MetricsURL == "" {
+	if options.MetricsHandler != nil && options.MetricsURL != "" {
+		return fmt.Errorf("native metrics cannot configure both MetricsHandler and MetricsURL")
+	}
+	if options.MetricsURL == "" && (options.FoldNativeMetrics || options.NativeMetricsOverflowLabel != "") {
+		return fmt.Errorf("FoldNativeMetrics and NativeMetricsOverflowLabel require MetricsURL")
+	}
+	if options.MetricsURL == "" && options.MetricsHandler == nil {
 		if options.NativeMetricsSchema != "" {
-			return fmt.Errorf("native metrics schema requires MetricsURL")
+			return fmt.Errorf("native metrics schema requires MetricsURL or MetricsHandler")
 		}
 		if (options.ResultFile != "") != (options.MetricParser != nil) {
 			return fmt.Errorf("result-file metrics require both ResultFile and MetricParser")
@@ -505,6 +523,9 @@ func (as *AgentServer) validateMetricsOptions() error {
 	if options.NativeMetricsSchema != MetricsSchemaShibuyaV1 {
 		return fmt.Errorf("unsupported native metrics schema %q; require shibuya-v1 from an adapter-normalized endpoint", options.NativeMetricsSchema)
 	}
+	if options.MetricsHandler != nil {
+		return nil
+	}
 	if options.NativeMetricsOverflowLabel != "" && options.NativeMetricsOverflowLabel != labelOthers && options.NativeMetricsOverflowLabel != "_other_" {
 		return fmt.Errorf("native metrics overflow label must be others or _other_")
 	}
@@ -516,7 +537,7 @@ func (as *AgentServer) validateMetricsOptions() error {
 }
 
 func (as *AgentServer) usesResultFileMetrics() bool {
-	return as.options.MetricsURL == "" && as.options.ResultFile != "" && as.options.MetricParser != nil
+	return as.options.MetricsURL == "" && as.options.MetricsHandler == nil && as.options.ResultFile != "" && as.options.MetricParser != nil
 }
 
 func fetchEngineMeta() (EngineMeta, error) {

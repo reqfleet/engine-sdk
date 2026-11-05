@@ -30,6 +30,9 @@ func (as *AgentServer) metricsHandler() http.Handler {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		})
 	}
+	if as.options.MetricsHandler != nil {
+		return as.options.MetricsHandler
+	}
 	if as.options.MetricsURL == "" {
 		return promhttp.HandlerFor(metricsRegistry(), promhttp.HandlerOpts{})
 	}

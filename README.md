@@ -72,6 +72,17 @@ example](AGENTS.md#resolve-deployment-options-before-construction).
 This API is unreleased and is not included in `v0.3.0`; adapters must pin a
 published release containing it before removing their local environment parsers.
 
+Adapters with an in-process normalized exporter can pass its `http.Handler` as
+`AgentServerOptions.MetricsHandler`, with
+`NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`. The SDK serves it directly
+through the existing authenticated `/metrics` route; no extra listener or
+loopback proxy is needed. `ResultFile` may still name workload output without
+`MetricParser`. The adapter retains parsing and exporter-state ownership; see the
+[example](AGENTS.md#resolve-deployment-options-before-construction) and
+[configuration contract](agent/metrics.md#integration-modes).
+`MetricsHandler` is also unreleased and absent from `v0.3.0`; publish and pin a
+release containing it before removing an adapter's listener/`MetricsURL` wiring.
+
 ## Coordinator backward compatibility
 
 The coordinator **MUST ALWAYS maintain backward compatibility with existing
