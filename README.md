@@ -65,6 +65,13 @@ For adapter development, start with [AGENTS.md](AGENTS.md). It covers the public
 packages, callback lifecycle, configuration, workspace ownership, metrics
 integration, and verification workflow, with links to the detailed contracts.
 
+To resolve SDK-owned deployment settings before initializing adapter components,
+use `agent.LoadAgentServerOptions`, then pass the resolved options to
+`agent.NewAgentServer`. See the [environment precedence and native-exporter
+example](AGENTS.md#resolve-deployment-options-before-construction).
+This API is unreleased and is not included in `v0.3.0`; adapters must pin a
+published release containing it before removing their local environment parsers.
+
 ## Coordinator backward compatibility
 
 The coordinator **MUST ALWAYS maintain backward compatibility with existing

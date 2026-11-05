@@ -96,6 +96,10 @@ type AgentServer struct {
 	pubsubClient pubsub.PubSubClient
 }
 
+// NewAgentServer constructs a server from explicit options without reloading the
+// environment-backed settings handled by LoadAgentServerOptions. It does not
+// start listeners or workloads; call Run to start the agent.
+// A zero LabelsUsageLimit is used as-is, not replaced with a default.
 func NewAgentServer(opts AgentServerOptions) *AgentServer {
 	if opts.Logger == nil {
 		opts.Logger = log.WithField("Source", "shibuya-agent")
@@ -398,35 +402,75 @@ func coordinatorRootCAs(caPEM string) (*x509.CertPool, error) {
 	return roots, nil
 }
 
-func MakeAgentServer(options AgentServerOptions) *AgentServer {
-	if options.Logger == nil {
-		options.Logger = log.WithFields(log.Fields{
-			"Source": "shibuya-agent",
-		})
-	}
+// LoadAgentServerOptions resolves SDK-owned environment settings before server
+// construction. It does not log, terminate the process, start services, or
+// validate adapter callbacks and metrics integration. On error it returns zero
+// options; the caller's options are not modified.
+//
+// Precedence and validation match MakeAgentServer:
+//   - LabelsUsageLimit is always replaced by label_limit, or 10 when that variable
+//     is unset or empty, even if the input option is nonzero. Nonempty values use
+//     strconv.Atoi: decimal digits with an optional sign, no surrounding whitespace,
+//     within the platform int range. Negative results are rejected; 0, +0, -0,
+//     and +1 are valid. Zero permits only the overflow label in SDK-managed modes.
+//   - A non-nil CoordinatorRootCAs is preserved and coordinator_ca_cert is ignored.
+//     Otherwise coordinator_ca_cert must contain at least one parseable PEM
+//     certificate. Unset, empty, whitespace-only, and malformed values are errors.
+//   - A nonzero EngineMeta is preserved as a whole, without filling missing fields
+//     or validating it. Otherwise engine_name must have five hyphen-separated
+//     components with an integer fifth component, and offset must be an integer.
+//     Both integers use strconv.Atoi; unset, empty, malformed, and overflowing
+//     integers are errors. EngineID is their sum, formatted in decimal.
+//     coordinator_ip, collection_id, zone, plan_id, and api_key are copied as-is;
+//     unset and empty values both become empty strings, without validation.
+//
+// All other options are preserved. To override a resolved value (including a zero
+// label limit), assign it after loading. Configure adapter-owned components from
+// the resolved options, then pass them to NewAgentServer, not MakeAgentServer,
+// to avoid another environment read.
+func LoadAgentServerOptions(options AgentServerOptions) (AgentServerOptions, error) {
 	if options.CoordinatorRootCAs == nil {
 		var err error
 		options.CoordinatorRootCAs, err = coordinatorRootCAs(os.Getenv("coordinator_ca_cert"))
 		if err != nil {
-			options.Logger.Fatal(err)
+			return AgentServerOptions{}, err
 		}
 	}
-	em := EngineMeta{}
-	if options.EngineMeta == em {
-		options.EngineMeta = fetchEngineMeta()
-	}
-	labelUsageLimit := 10
-	t := os.Getenv("label_limit")
-	if t != "" {
+	if options.EngineMeta == (EngineMeta{}) {
 		var err error
-		labelUsageLimit, err = strconv.Atoi(t)
+		options.EngineMeta, err = fetchEngineMeta()
 		if err != nil {
-			options.Logger.Fatal(err)
+			return AgentServerOptions{}, err
 		}
 	}
-	options.LabelsUsageLimit = labelUsageLimit
-	as := NewAgentServer(options)
-	return as
+	options.LabelsUsageLimit = 10
+	if value := os.Getenv("label_limit"); value != "" {
+		limit, err := strconv.Atoi(value)
+		if err != nil {
+			return AgentServerOptions{}, fmt.Errorf("invalid label_limit: %w", err)
+		}
+		if limit < 0 {
+			return AgentServerOptions{}, fmt.Errorf("label_limit must be nonnegative")
+		}
+		options.LabelsUsageLimit = limit
+	}
+	return options, nil
+}
+
+// MakeAgentServer loads environment-backed options using LoadAgentServerOptions,
+// then constructs a server with NewAgentServer. It logs fatally on configuration
+// errors. Call LoadAgentServerOptions directly to handle errors without exiting
+// or to configure adapter components before constructing the server.
+func MakeAgentServer(options AgentServerOptions) *AgentServer {
+	if options.Logger == nil {
+		options.Logger = log.WithField("Source", "shibuya-agent")
+	}
+	resolved, err := LoadAgentServerOptions(options)
+	if err != nil {
+		options.Logger.Fatal(err)
+		return nil
+	}
+	return NewAgentServer(resolved)
 }
 
 func (as *AgentServer) updateSubStatus(subscribed bool) {
@@ -475,17 +519,16 @@ func (as *AgentServer) usesResultFileMetrics() bool {
 	return as.options.MetricsURL == "" && as.options.ResultFile != "" && as.options.MetricParser != nil
 }
 
-func fetchEngineMeta() EngineMeta {
+func fetchEngineMeta() (EngineMeta, error) {
 	engineID, err := extractEngineIDFromName(os.Getenv("engine_name"))
 	if err != nil {
-		log.Fatal(err)
+		return EngineMeta{}, fmt.Errorf("invalid engine_name: %w", err)
 	}
 	offset, err := strconv.Atoi(os.Getenv("offset"))
 	if err != nil {
-		log.Fatal(err)
+		return EngineMeta{}, fmt.Errorf("invalid offset: %w", err)
 	}
 	engineID += offset
-	log.Infof("Engine starts with id %d", engineID)
 	return EngineMeta{
 		CoordinatorIP: os.Getenv("coordinator_ip"),
 		CollectionID:  os.Getenv("collection_id"),
@@ -493,7 +536,7 @@ func fetchEngineMeta() EngineMeta {
 		PlanID:        os.Getenv("plan_id"),
 		EngineID:      strconv.Itoa(engineID),
 		APIKey:        os.Getenv("api_key"),
-	}
+	}, nil
 }
 
 func extractEngineIDFromName(engineName string) (int, error) {

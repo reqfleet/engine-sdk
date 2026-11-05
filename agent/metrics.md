@@ -127,11 +127,16 @@ additional HTTP requests without understanding that adapter's event model.
 
 Runtime admission is configured by the nonnegative
 `AgentServerOptions.LabelsUsageLimit`, not by coordinator run messages or the
-upload-preflight callback. `NewAgentServer` uses that option directly;
-`MakeAgentServer` sets it from the lowercase `label_limit` environment variable
-(default 10). The workload inherits `label_limit` when present in the agent
-environment, subject to `Command.Env` overrides. The SDK does not export
-`LabelsUsageLimit` or its default back into that environment.
+upload-preflight callback. `NewAgentServer` uses that option directly, including
+zero; `LoadAgentServerOptions` and `MakeAgentServer` resolve it from the lowercase
+`label_limit` environment variable (default 10 when unset or empty).
+Adapters can use the loader's resolved budget to initialize native exporters,
+then pass the same options to `NewAgentServer` without another environment read.
+See the [environment configuration contract](../AGENTS.md#resolve-deployment-options-before-construction)
+for validation and explicit-option precedence.
+The workload inherits `label_limit` when present in the agent environment,
+subject to `Command.Env` overrides. The SDK does not export `LabelsUsageLimit`
+or its default back into that environment.
 Result-file ingestion and opt-in SDK folding permit **at most N named request
 labels plus one overflow label per agent/run**. In those SDK-managed modes, zero
 permits only overflow. Negative budgets are invalid in every mode.

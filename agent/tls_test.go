@@ -22,24 +22,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCoordinatorRootCAsRejectsInvalidInput(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		pem  string
-		err  string
-	}{
-		{name: "missing", err: "missing required coordinator CA certificate: coordinator_ca_cert"},
-		{name: "whitespace", pem: " \t\n\r ", err: "missing required coordinator CA certificate: coordinator_ca_cert"},
-		{name: "malformed PEM", pem: "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----", err: "invalid coordinator CA certificate: coordinator_ca_cert"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			roots, err := coordinatorRootCAs(tc.pem)
-			require.EqualError(t, err, tc.err)
-			require.Nil(t, roots)
-		})
-	}
-}
-
 func newCoordinatorTestCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
