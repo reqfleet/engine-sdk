@@ -20,6 +20,9 @@ import (
 const maxNativeMetricsBytes = 16 << 20
 
 func (as *AgentServer) startMetricsRun(runID string) {
+	if as.options.MetricsHandler != nil {
+		return
+	}
 	if as.options.MetricsURL == "" {
 		as.labelsLock.Lock()
 		as.labelsByRun[runID] = make(map[string]struct{})

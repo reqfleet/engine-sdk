@@ -70,9 +70,10 @@
 // # Metrics integration
 //
 // Adapters either map result-file events with MetricParser, explicitly declare
-// MetricsSchemaShibuyaV1 for an adapter-normalized native endpoint, or expose the
-// registry without request ingestion. A Prometheus URL alone is not a schema
-// mapping. See the [metrics contract] for names, units, labels, bucket profiles,
+// MetricsSchemaShibuyaV1 for an adapter-normalized MetricsHandler or MetricsURL,
+// or expose the registry without request ingestion. These sources are mutually
+// exclusive; a Prometheus handler or URL alone is not a schema mapping.
+// See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
 //
 // Runtime label admission uses AgentServerOptions.LabelsUsageLimit, not coordinator
@@ -85,10 +86,18 @@
 // their own configured limits.
 // Native proxying streams by default without parsing, format negotiation,
 // validation, or SDK label admission.
+// MetricsHandler serves directly behind the SDK's GET /metrics authentication,
+// preserving the incoming request context and the handler's status, headers, and
+// body, including errors. It does not proxy, parse, fold, cache, or merge output.
+// The adapter owns parsing, normalization, label limits, concurrent access,
+// run-local exporter state, final-scrape retention, and exporter shutdown; the SDK
+// owns the listener. ResultFile may still name workload output without a parser.
 //
-// FoldNativeMetrics explicitly enables last-resort SDK folding for native engines
-// that cannot enforce the budget. It buffers and parses each Prometheus text
-// snapshot (at most 16 MiB), validates safe aggregation, and re-encodes the result.
+// FoldNativeMetrics explicitly enables last-resort SDK folding for URL-backed
+// native engines that cannot enforce the budget. It and NativeMetricsOverflowLabel
+// require MetricsURL and cannot be used with MetricsHandler or registry ingestion.
+// Folding buffers and parses each Prometheus text snapshot (at most 16 MiB),
+// validates safe aggregation, and re-encodes the result.
 // Invalid snapshots fail rather than bypassing admission. Admission is stable
 // across scrapes; colliding cumulative counters and histograms are aggregated
 // within each snapshot, not added again across snapshots. The producer must retain

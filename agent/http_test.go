@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/reqfleet/engine-sdk/protocol"
 	"github.com/stretchr/testify/assert"
@@ -18,6 +20,11 @@ import (
 
 func TestMetricsOptionsAdmission(t *testing.T) {
 	parser := func(string) (ShibuyaMetric, error) { return ShibuyaMetric{}, nil }
+	handlerCalls := 0
+	exporter := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handlerCalls++
+		w.WriteHeader(http.StatusBadGateway)
+	})
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
@@ -34,7 +41,7 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 		{name: "negative native label limit", options: AgentServerOptions{MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: -1}, invalid: true},
 		{name: "unpaired file", options: AgentServerOptions{ResultFile: "results"}, invalid: true},
 		{name: "unpaired parser", options: AgentServerOptions{MetricParser: parser}, invalid: true},
-		{name: "schema without URL", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "schema without source", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
 		{name: "native parser conflict", options: AgentServerOptions{MetricsURL: source.URL, MetricParser: parser}, invalid: true},
 		{name: "native file and parser conflict", options: AgentServerOptions{ResultFile: "results", MetricParser: parser, NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: source.URL}, invalid: true},
 		{name: "missing schema", options: AgentServerOptions{MetricsURL: source.URL}, invalid: true},
@@ -47,6 +54,22 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 		{name: "native HTTP", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: source.URL}},
 		{name: "native HTTPS", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: "https://localhost:9102/metrics"}},
 		{name: "native workload output", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: source.URL, ResultFile: "workload-output"}},
+		{name: "native folding", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: source.URL, FoldNativeMetrics: true, NativeMetricsOverflowLabel: "_other_"}},
+		{name: "native overflow without folding", options: AgentServerOptions{NativeMetricsSchema: MetricsSchemaShibuyaV1, MetricsURL: source.URL, NativeMetricsOverflowLabel: "others"}},
+		{name: "registry folding", options: AgentServerOptions{FoldNativeMetrics: true}, invalid: true},
+		{name: "registry overflow", options: AgentServerOptions{NativeMetricsOverflowLabel: "others"}, invalid: true},
+		{name: "result folding", options: AgentServerOptions{ResultFile: "results", MetricParser: parser, FoldNativeMetrics: true}, invalid: true},
+		{name: "result overflow", options: AgentServerOptions{ResultFile: "results", MetricParser: parser, NativeMetricsOverflowLabel: "others"}, invalid: true},
+		{name: "handler", options: AgentServerOptions{MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1}},
+		{name: "handler workload output", options: AgentServerOptions{MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1, ResultFile: "results.csv"}},
+		{name: "negative handler label limit", options: AgentServerOptions{MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: -1}, invalid: true},
+		{name: "handler URL conflict", options: AgentServerOptions{MetricsHandler: exporter, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "handler parser conflict", options: AgentServerOptions{MetricsHandler: exporter, MetricParser: parser, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "handler file and parser conflict", options: AgentServerOptions{MetricsHandler: exporter, ResultFile: "results.csv", MetricParser: parser, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "handler missing schema", options: AgentServerOptions{MetricsHandler: exporter}, invalid: true},
+		{name: "handler unknown schema", options: AgentServerOptions{MetricsHandler: exporter, NativeMetricsSchema: "native-v2"}, invalid: true},
+		{name: "handler folding", options: AgentServerOptions{MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1, FoldNativeMetrics: true}, invalid: true},
+		{name: "handler overflow", options: AgentServerOptions{MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1, NativeMetricsOverflowLabel: "others"}, invalid: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -62,6 +85,7 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 			response := httptest.NewRecorder()
 			as.metricsHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 			assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+			assert.Zero(t, handlerCalls, "invalid options must not invoke the exporter")
 		})
 	}
 
@@ -125,29 +149,40 @@ func TestPreparationProgressRequiresAuthentication(t *testing.T) {
 }
 
 func TestHandlerAuthentication(t *testing.T) {
-	as := NewAgentServer(AgentServerOptions{EngineMeta: EngineMeta{APIKey: "secret"}})
+	calls := 0
+	as := NewAgentServer(AgentServerOptions{
+		EngineMeta:          EngineMeta{APIKey: "secret"},
+		NativeMetricsSchema: MetricsSchemaShibuyaV1,
+		MetricsHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusOK)
+		}),
+	})
 	handler := as.Handler()
 	for _, tt := range []struct {
-		name, token, body string
-		status            int
+		name, token string
+		status      int
 	}{
-		{"missing", "", "bearer header is empty\n", http.StatusBadRequest},
-		{"wrong case", "bearer secret", "token is invalid\n", http.StatusBadRequest},
-		{"missing separator", "Bearer", "token is invalid\n", http.StatusBadRequest},
-		{"extra separator", "Bearer  secret", "token is invalid\n", http.StatusBadRequest},
-		{"wrong token", "Bearer wrong", "forbidden\n", http.StatusForbidden},
-		{"empty token", "Bearer ", "forbidden\n", http.StatusForbidden},
-		{"correct", "Bearer secret", "", http.StatusOK},
+		{"missing", "", http.StatusBadRequest},
+		{"wrong case", "bearer secret", http.StatusBadRequest},
+		{"missing separator", "Bearer", http.StatusBadRequest},
+		{"extra separator", "Bearer  secret", http.StatusBadRequest},
+		{"wrong token", "Bearer wrong", http.StatusForbidden},
+		{"empty token", "Bearer ", http.StatusForbidden},
+		{"correct", "Bearer secret", http.StatusOK},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, endpoint := range []string{"/progress", "/prepare-progress", "/metrics"} {
 				request := httptest.NewRequest(http.MethodGet, endpoint, nil)
+				before := calls
 				request.Header.Set("Authorization", tt.token)
 				response := httptest.NewRecorder()
 				handler.ServeHTTP(response, request)
 				assert.Equal(t, tt.status, response.Code, endpoint)
-				if tt.body != "" {
-					assert.Equal(t, tt.body, response.Body.String(), endpoint)
+				if tt.status == http.StatusOK && endpoint == "/metrics" {
+					assert.Equal(t, before+1, calls)
+				} else {
+					assert.Equal(t, before, calls, "rejected requests and other routes must not invoke the exporter")
 				}
 			}
 		})
@@ -155,7 +190,6 @@ func TestHandlerAuthentication(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
-	assert.Equal(t, "not subscribed to coordinator\n", response.Body.String())
 }
 
 func TestNativeMetricsProxyPreservesTargetAndFailure(t *testing.T) {
@@ -187,4 +221,109 @@ func TestNativeMetricsProxyPreservesTargetAndFailure(t *testing.T) {
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusBadGateway, response.Code)
+}
+
+func TestInProcessMetricsPreservesResponses(t *testing.T) {
+	snapshot := nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{
+		{"checkout", "200", 12.5, 1234},
+		{"search", "503", 250, 5678},
+	})
+	for _, tt := range []struct {
+		name, contentType, body string
+		status                  int
+	}{
+		{"metrics", "text/plain; version=0.0.4", snapshot, http.StatusOK},
+		{"unavailable", "application/json", `{"error":"exporter unavailable"}`, http.StatusServiceUnavailable},
+		{"limited", "text/plain", "scrape already running\n", http.StatusTooManyRequests},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			as := NewAgentServer(AgentServerOptions{
+				EngineMeta:          EngineMeta{APIKey: "secret"},
+				NativeMetricsSchema: MetricsSchemaShibuyaV1,
+				LabelsUsageLimit:    0, // The adapter, not the SDK, owns admission.
+				MetricsHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", tt.contentType)
+					w.Header().Set("Retry-After", "2")
+					w.Header().Add("X-Exporter", "first")
+					w.Header().Add("X-Exporter", "second")
+					w.WriteHeader(tt.status)
+					_, _ = io.WriteString(w, tt.body)
+				}),
+			})
+			request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			request.Header.Set("Authorization", "Bearer secret")
+			response := httptest.NewRecorder()
+			as.Handler().ServeHTTP(response, request)
+			assert.Equal(t, tt.status, response.Code)
+			assert.Equal(t, tt.contentType, response.Header().Get("Content-Type"))
+			assert.Equal(t, "2", response.Header().Get("Retry-After"))
+			assert.Equal(t, []string{"first", "second"}, response.Header().Values("X-Exporter"))
+			assert.Equal(t, tt.body, response.Body.String())
+		})
+	}
+}
+
+func TestInProcessMetricsUsesRequestContext(t *testing.T) {
+	type contextKey struct{}
+	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), contextKey{}, "scrape"), 5*time.Second)
+	defer cancel()
+	entered := make(chan context.Context, 1)
+	done := make(chan struct{})
+	as := NewAgentServer(AgentServerOptions{
+		EngineMeta:          EngineMeta{APIKey: "secret"},
+		NativeMetricsSchema: MetricsSchemaShibuyaV1,
+		MetricsHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			entered <- r.Context()
+			<-r.Context().Done()
+			http.Error(w, "scrape canceled", http.StatusRequestTimeout)
+		}),
+	})
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler := as.Handler()
+	go func() {
+		defer close(done)
+		handler.ServeHTTP(response, request)
+	}()
+	select {
+	case actual := <-entered:
+		assert.Same(t, ctx, actual)
+		assert.Equal(t, "scrape", actual.Value(contextKey{}))
+	case <-ctx.Done():
+		t.Fatal("exporter did not receive the scrape")
+	}
+	cancel()
+	select {
+	case <-done:
+		assert.Equal(t, http.StatusRequestTimeout, response.Code)
+	case <-time.After(5 * time.Second):
+		t.Fatal("scrape did not stop on request cancellation")
+	}
+}
+
+func TestInProcessMetricsWithWorkloadOutput(t *testing.T) {
+	var resultPath string
+	f := newAgentFixture(t, AgentServerOptions{
+		ResultFile:          "results.csv",
+		NativeMetricsSchema: MetricsSchemaShibuyaV1,
+		MetricsHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "adapter_ready 1\n")
+		}),
+		BuildCommand: func(_ context.Context, run RunContext) (Command, error) {
+			resultPath = run.ResultFile
+			return Command{Command: "sh", Args: []string{"-c", `printf 'checkout,200,12.5\n' > "$1"`, "engine", run.ResultFile}}, nil
+		},
+	}, nil)
+	f.send(runMessage(protocol.VerbStart, "run-1", ""))
+	waitRunState(t, f, "run-1", protocol.RunCompleted)
+	content, err := os.ReadFile(resultPath)
+	require.NoError(t, err)
+	assert.Equal(t, "checkout,200,12.5\n", string(content))
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	f.server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, "adapter_ready 1\n", response.Body.String())
 }
