@@ -1,18 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Features
-
-* **agent:** Accept `MetricsHandler http.Handler` for normalized in-process
-  exporters on the SDK's authenticated `/metrics` route, preserving request
-  context and response status, headers, and body without another listener or
-  proxy. Require `shibuya-v1`, reject conflicting metrics sources, and allow
-  handler-backed workload `ResultFile` output without a parser ([#15](https://github.com/reqfleet/engine-sdk/issues/15)).
-* **agent:** Require `MetricsURL` for native folding options; reject previously
-  ignored folding configuration in registry/result-file modes and reject it
-  for in-process handlers.
-
 ## [0.3.0](https://github.com/reqfleet/engine-sdk/compare/v0.2.1...v0.3.0) (2026-10-31)
 
 
