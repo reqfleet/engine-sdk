@@ -76,6 +76,71 @@ dependencies, writable workspace paths, access to the coordinator, and readable
 cgroup v1 or v2 CPU/memory files. `Run()` collects container resource metrics; a
 local build or handler check on another OS is not a deployed-engine smoke test.
 
+## Resolve deployment options before construction
+
+Call `agent.LoadAgentServerOptions(base)` to obtain environment-backed options
+before initializing adapter components. It returns `(AgentServerOptions, error)`,
+does not mutate `base`, and does not log, exit, construct a server, or start
+listeners or workloads. On error, the returned options are zero-valued.
+Callback and metrics-integration validation remains separate from environment
+loading.
+
+| Setting | Environment and precedence |
+| --- | --- |
+| `LabelsUsageLimit` | Always replaced by lowercase `label_limit`, even when `base` supplies a value. Unset or empty means 10. Nonempty values use Go's `strconv.Atoi`: decimal, optional sign, no whitespace, within the platform `int` range. Negative results are errors; `0`, `+0`, `-0`, and `+1` are valid. |
+| `CoordinatorRootCAs` | A non-nil explicit pool wins and skips the environment. Otherwise `coordinator_ca_cert` must contain at least one parseable PEM certificate, not a filename. Unset, empty, whitespace-only, and malformed values are errors. |
+| `EngineMeta` | A nonzero explicit struct wins as a whole, without validation or filling empty fields. Otherwise load all metadata from the variables below. |
+| Other options | Preserved unchanged, including adapter callbacks and metrics options. |
+
+Environment-derived metadata uses `engine_name` with exactly five
+hyphen-separated components; the fifth component and the required `offset`
+must parse with `strconv.Atoi`. Unset, empty, malformed, or overflowing integers
+are errors. `EngineID` is the suffix plus offset, formatted in decimal.
+`coordinator_ip`, `collection_id`, `zone`, `plan_id`, and `api_key` are copied
+as-is, without additional validation; unset and empty both yield an empty string.
+
+These rules retain the SDK's existing empty/default and signed-integer semantics,
+rather than adopting an adapter-local strict unsigned parser. Negative label
+limits now fail during loading instead of waiting for metrics validation.
+Zero is a real budget: SDK-managed metrics admit only the overflow label.
+Native exporters must implement their own configured budget semantics.
+
+To make an explicit override, assign it **after** loading, before initializing
+dependent components. Pass those same options to `agent.NewAgentServer`, which
+does not reread these environment settings or replace a zero label limit.
+`agent.MakeAgentServer` uses the same loader, but retains fatal logging on errors;
+do not pass already-resolved options through it.
+
+For example, this adapter-owned helper initializes a native exporter from the
+resolved budget, then constructs the SDK server from the same options:
+
+```go
+func newNativeAgent(
+    base agent.AgentServerOptions,
+    startExporter func(labelLimit int) (metricsURL string, err error),
+) (*agent.AgentServer, error) {
+    options, err := agent.LoadAgentServerOptions(base)
+    if err != nil {
+        return nil, err
+    }
+    metricsURL, err := startExporter(options.LabelsUsageLimit)
+    if err != nil {
+        return nil, err
+    }
+    options.MetricsURL = metricsURL
+    options.NativeMetricsSchema = agent.MetricsSchemaShibuyaV1
+    options.FoldNativeMetrics = false
+    return agent.NewAgentServer(options), nil
+}
+```
+
+Supply `BuildCommand` and other adapter hooks in `base`, with `MetricParser` nil.
+`startExporter` is your adapter's initializer, not an SDK callback: it must
+initialize the real exporter, enforce its configured label budget, and return
+the URL of its normalized endpoint conforming to [the metrics contract](agent/metrics.md).
+The adapter owns exporter shutdown and handles errors from the returned server's
+`Run()` method. No local `label_limit` lookup or parser is needed.
+
 ## Implement an adapter
 
 ### 1. Consume control-plane inputs
@@ -261,10 +326,12 @@ caller-owned slices.
 
 You package the adapter executable, engine binary/runtime, and any tools required
 by your callbacks into an engine image. In the adapter entry point, configure
-your hooks and filenames, create `agent.MakeAgentServer(options)`, call `Run()`,
-and handle its returned error. Agree the image's filesystem and launch requirements
-with the deployment integration; the SDK does not provision a container or register
-the image. There is no public standalone start API.
+your hooks and filenames, resolve deployment options with
+`agent.LoadAgentServerOptions`, initialize adapter components, and create
+`agent.NewAgentServer(options)`. Handle loading errors and the error returned by
+`Run()`. Agree the image's filesystem and launch requirements with the deployment
+integration; the SDK does not provision a container or register the image.
+There is no public standalone start API.
 
 Set `AGENT_ROOT` to an absolute, writable directory before constructing the server.
 Also create writable `/test-data`; it is separate from `AGENT_ROOT`. The SDK creates

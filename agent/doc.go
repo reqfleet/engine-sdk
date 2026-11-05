@@ -76,9 +76,11 @@
 // accumulation semantics, and built-in adapter limitations.
 //
 // Runtime label admission uses AgentServerOptions.LabelsUsageLimit, not coordinator
-// run messages. MakeAgentServer reads the lowercase label_limit environment
-// variable (default 10); NewAgentServer uses the option directly. The SDK has no
-// tier policy. Workloads inherit label_limit if present; Command.Env may override
+// run messages. LoadAgentServerOptions resolves the lowercase label_limit
+// environment variable (default 10 when unset or empty); MakeAgentServer uses the
+// same loader. NewAgentServer uses the resolved option directly, including zero.
+// Adapters can initialize native exporters from those options before construction.
+// The SDK has no tier policy. Workloads inherit label_limit if present; Command.Env may override
 // it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce
 // their own configured limits.
 // Native proxying streams by default without parsing, format negotiation,
