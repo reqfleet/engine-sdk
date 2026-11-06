@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "reqfleet-address-pr-comments": {
+      "source": "reqfleet/skills",
+      "sourceType": "github",
+      "skillPath": "skills/reqfleet-dev/reqfleet-address-pr-comments/SKILL.md",
+      "computedHash": "8ea0a24d6ea7c5ca8617eb9cefccb90dee356845c75668e13a637366e82a4be0"
+    },
+    "reqfleet-commit": {
+      "source": "reqfleet/skills",
+      "sourceType": "github",
+      "skillPath": "skills/reqfleet-dev/reqfleet-commit/SKILL.md",
+      "computedHash": "76ffc1eae876ccfa1da929d7453b342e8d5a13abf2f12375c25b725e76d61a1c"
+    },
+    "reqfleet-go-performance": {
+      "source": "reqfleet/skills",
+      "sourceType": "github",
+      "skillPath": "skills/reqfleet-dev/reqfleet-go-performance/SKILL.md",
+      "computedHash": "5119e9ed4ad10e33575c828e8b088e6ecc2116a9a329ff560ce54a7566b4f5cc"
+    },
+    "reqfleet-go-style-core": {
+      "source": "reqfleet/skills",
+      "sourceType": "github",
+      "skillPath": "skills/reqfleet-dev/reqfleet-go-style-core/SKILL.md",
+      "computedHash": "e59218969bfd1bc429cd4377cb0d9e7cfdec1c7ab0255624f324f9e64e75cee8"
+    },
+    "reqfleet-issue-to-development": {
+      "source": "reqfleet/skills",
+      "sourceType": "github",
+      "skillPath": "skills/reqfleet-dev/reqfleet-issue-to-development/SKILL.md",
+      "computedHash": "be55fabcf1e72e7f5d9825ab4a057cafa058dcb2dbb037848af9144fe11f930a"
+    }
+  }
+}
