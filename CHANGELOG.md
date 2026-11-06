@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/reqfleet/engine-sdk/compare/v0.3.0...v0.4.0) (2026-11-06)
+
+
+### Features
+
+* **agent:** accept in-process metrics handlers ([#16](https://github.com/reqfleet/engine-sdk/issues/16)) ([0be3f54](https://github.com/reqfleet/engine-sdk/commit/0be3f54c6200873999ea941ceef582b5812aa488))
+* **agent:** expose reusable environment option parsing ([#13](https://github.com/reqfleet/engine-sdk/issues/13)) ([73e4817](https://github.com/reqfleet/engine-sdk/commit/73e4817c04d753f8d9423bbe18f3730831fc64c7)), closes [#12](https://github.com/reqfleet/engine-sdk/issues/12)
+
 ## [0.3.0](https://github.com/reqfleet/engine-sdk/compare/v0.2.1...v0.3.0) (2026-10-31)
 
 
