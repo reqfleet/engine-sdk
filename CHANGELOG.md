@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/reqfleet/engine-sdk/compare/v0.4.0...v0.5.0) (2026-11-10)
+
+
+### Features
+
+* **containerstats:** Expose readers and fix cgroup v1 CPU units ([#19](https://github.com/reqfleet/engine-sdk/issues/19)) ([84a065b](https://github.com/reqfleet/engine-sdk/commit/84a065b4c46836cda0e76a101c169cc2584dc11f))
+
 ## [0.4.0](https://github.com/reqfleet/engine-sdk/compare/v0.3.0...v0.4.0) (2026-11-06)
 
 
