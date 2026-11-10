@@ -1,3 +1,5 @@
+// Package containerstats implements the readers exposed by the public
+// github.com/reqfleet/engine-sdk/containerstats package.
 package containerstats
 
 import (
@@ -6,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -13,9 +16,9 @@ const (
 )
 
 var (
-	cgroupVersion      = ""
+	cgroupVersion      = sync.OnceValue(detectCgroupVersion)
 	noContentError     = "No content in the file %s"
-	cpuByCgroupVersion = map[string]StatsParser{
+	cpuByCgroupVersion = map[string]statsParser{
 		"v2": {
 			path:   "/sys/fs/cgroup/cpu.stat",
 			parser: readCPUStatFileV2,
@@ -25,7 +28,7 @@ var (
 			parser: readCPUStatFileV1,
 		},
 	}
-	memByCgroupVersion = map[string]StatsParser{
+	memByCgroupVersion = map[string]statsParser{
 		"v2": {
 			path:   "/sys/fs/cgroup/memory.current",
 			parser: readMemoryStatFile,
@@ -37,25 +40,20 @@ var (
 	}
 )
 
-type StatsParser struct {
+type statsParser struct {
 	path   string
 	parser func(path string) (uint64, error)
 }
 
-func (sp StatsParser) readUsage() (uint64, error) {
+func (sp statsParser) readUsage() (uint64, error) {
 	return sp.parser(sp.path)
 }
 
 func detectCgroupVersion() string {
-	if cgroupVersion != "" {
-		return cgroupVersion
-	}
 	if _, err := os.Stat(cgroupV2Path); err == nil {
-		cgroupVersion = "v2"
-		return cgroupVersion
+		return "v2"
 	}
-	cgroupVersion = "v1"
-	return cgroupVersion
+	return "v1"
 }
 
 func readFirstLine(path string) (string, error) {
@@ -88,8 +86,7 @@ func findValueInFile(path, key string) (string, error) {
 	return "", fmt.Errorf("key %s not found in file %s", key, path)
 }
 
-// Read the CPU usage file for cgroup v1
-// This file contains a single number representing the CPU usage in nanoseconds
+// Convert the cgroup v1 cumulative CPU time from nanoseconds to microseconds.
 func readCPUStatFileV1(path string) (uint64, error) {
 	t, err := readFirstLine(path)
 	if err != nil {
@@ -98,7 +95,11 @@ func readCPUStatFileV1(path string) (uint64, error) {
 	if t == "" {
 		return 0, fmt.Errorf(noContentError, path)
 	}
-	return strconv.ParseUint(t, 10, 64)
+	nanoseconds, err := strconv.ParseUint(t, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return nanoseconds / 1000, nil
 }
 
 func readCPUStatFileV2(path string) (uint64, error) {
@@ -123,18 +124,18 @@ func readMemoryStatFile(path string) (uint64, error) {
 	return strconv.ParseUint(t, 10, 64)
 }
 
-func readUsage(m map[string]StatsParser) (uint64, error) {
-	cgroupVersion := detectCgroupVersion()
-	sp := m[cgroupVersion]
+func readUsage(m map[string]statsParser) (uint64, error) {
+	version := cgroupVersion()
+	sp := m[version]
 	return sp.readUsage()
 }
 
-// Return the raw usage in microseconds
+// ReadCPUUsage returns cumulative cgroup CPU time in microseconds.
 func ReadCPUUsage() (uint64, error) {
 	return readUsage(cpuByCgroupVersion)
 }
 
-// Return the RSS memory in bytes
+// ReadMemoryUsage returns current cgroup-accounted memory in bytes.
 func ReadMemoryUsage() (uint64, error) {
 	return readUsage(memByCgroupVersion)
 }

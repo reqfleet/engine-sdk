@@ -83,6 +83,13 @@ loopback proxy is needed. `ResultFile` may still name workload output without
 `MetricsHandler` is also unreleased and absent from `v0.3.0`; publish and pin a
 release containing it before removing an adapter's listener/`MetricsURL` wiring.
 
+Custom exporters can reuse the public
+[`containerstats`](containerstats) package to read Linux cgroup CPU and memory
+usage without importing the agent runtime or Prometheus. The SDK runtime uses
+the same readers. See the [resource metrics contract](agent/metrics.md#runtime-resource-metrics)
+for units, sampling, and exporter ownership. This public package is unreleased;
+pin a development revision or a published release containing it before importing it.
+
 ## Coordinator backward compatibility
 
 The coordinator **MUST ALWAYS maintain backward compatibility with existing

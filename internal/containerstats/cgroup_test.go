@@ -18,14 +18,24 @@ func TestReadCPUStatFileV1(t *testing.T) {
 		{
 			name:        "valid cpu usage",
 			content:     "123456789\n",
-			expected:    123456789,
+			expected:    123456,
 			expectError: false,
 		},
 		{
 			name:        "valid cpu usage without newline",
 			content:     "987654321",
-			expected:    987654321,
+			expected:    987654,
 			expectError: false,
+		},
+		{
+			name:     "sub-microsecond usage",
+			content:  "999\n",
+			expected: 0,
+		},
+		{
+			name:     "one microsecond",
+			content:  "1000\n",
+			expected: 1,
 		},
 		{
 			name:        "empty file",
