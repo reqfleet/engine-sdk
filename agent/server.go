@@ -20,7 +20,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/hpcloud/tail"
-	"github.com/reqfleet/engine-sdk/internal/containerstats"
+	"github.com/reqfleet/engine-sdk/containerstats"
 	"github.com/reqfleet/engine-sdk/internal/coordinator"
 	"github.com/reqfleet/engine-sdk/internal/pubsub"
 	"github.com/reqfleet/engine-sdk/protocol"

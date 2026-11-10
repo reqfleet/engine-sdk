@@ -288,10 +288,44 @@ omitted. Existing error charts classify non-2xx/non-3xx statuses as errors.
 ## Runtime resource metrics
 
 In addition to the engine's request metrics, `github.com/reqfleet/engine-sdk/agent` automatically collects
-runtime CPU and memory usage. In result-file mode, it exposes these as
-`shibuya_cpu_gauge` (CPU cores) and `shibuya_mem_gauge` (bytes) alongside the parsed
-request metrics. Native endpoints and in-process handlers provide these resource
-metrics in their own Prometheus exposition; the SDK does not merge its registry.
+runtime CPU and memory usage. In result-file and registry-only modes, it exposes
+these as `shibuya_cpu_gauge` (CPU cores) and `shibuya_mem_gauge` (bytes).
+Native endpoints and in-process handlers provide these resource metrics in
+their own Prometheus exposition; the SDK does not merge its registry.
+
+Adapter-owned exporters can reuse the same readers as the runtime by importing
+`github.com/reqfleet/engine-sdk/containerstats`:
+
+- `containerstats.ReadCPUUsage() (uint64, error)` returns cumulative CPU time in
+  **microseconds**, normalized across cgroup v1 and v2. V1's nanosecond counter is
+  truncated to whole microseconds.
+- `containerstats.ReadMemoryUsage() (uint64, error)` returns current
+  cgroup-accounted memory in **bytes**, including cache. It is not process RSS or
+  the configured memory limit.
+
+These are container/cgroup measurements, including the SDK and engine processes
+sharing the cgroup, not per-PID measurements. The readers require readable Linux
+cgroup files at the conventional container mount paths under `/sys/fs/cgroup`;
+they do not discover host-side paths or nested process membership. See the
+[package documentation](../containerstats/cgroup.go) for the exact v1/v2 paths.
+Calls are synchronous and safe to make concurrently, including alongside the SDK
+runtime. They start no workers, register no collectors, and require no coordinator.
+Missing, unreadable, or malformed files return errors, not successful zero samples.
+
+To produce `metricschema.CPUGauge`, keep the previous successful CPU sample and
+its timestamp in exporter-owned state. Divide the CPU delta by the elapsed
+wall-clock microseconds to obtain average cores consumed; use actual elapsed
+time, not the configured polling interval. The first sample establishes a
+baseline without a rate. Re-establish that baseline at run boundaries or if the
+counter decreases, and require positive elapsed time before calculating a rate.
+Use a monotonic clock, such as timestamps from Go's `time.Now`.
+
+Publish memory readings directly as `metricschema.MemoryGauge`. Supply the
+identity labels defined by `metricschema.ResourceLabels`, using resolved
+`EngineMeta` and the current `RunContext.RunID`. Synchronize exporter-owned
+sampling state, handle read errors rather than fabricating zeros, and own any
+sampling worker's shutdown. Calling the readers does not automatically add
+resource families to a `MetricsHandler` or `MetricsURL` response.
 
 ## Explicit adapter mapping examples
 
