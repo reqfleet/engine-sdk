@@ -126,7 +126,7 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	monitors.Wait()
 	readers.Wait()
 	if as.options.Progress != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), FinalProgressTimeout)
 		as.collectProgress(ctx, run)
 		cancel()
 	}

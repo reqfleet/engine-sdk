@@ -23,10 +23,23 @@ import (
 	"github.com/reqfleet/engine-sdk/containerstats"
 	"github.com/reqfleet/engine-sdk/internal/coordinator"
 	"github.com/reqfleet/engine-sdk/internal/pubsub"
+	"github.com/reqfleet/engine-sdk/metricschema"
 	"github.com/reqfleet/engine-sdk/protocol"
 )
 
 const labelOthers = "others"
+
+const (
+	// DefaultStopTimeout is the graceful-stop deadline used when StopTimeout is
+	// nonpositive. The runtime then escalates to SIGKILL.
+	DefaultStopTimeout = 10 * time.Second
+	// ObservationTimeout bounds each Observe callback's context.
+	// The callback must honor cancellation.
+	ObservationTimeout = 5 * time.Second
+	// FinalProgressTimeout bounds the final Progress callback's fresh context.
+	// The callback must honor cancellation.
+	FinalProgressTimeout = 2 * time.Second
+)
 
 var STDERR = "/dev/stderr"
 
@@ -105,7 +118,7 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 		opts.Logger = log.WithField("Source", "shibuya-agent")
 	}
 	if opts.StopTimeout <= 0 {
-		opts.StopTimeout = 10 * time.Second
+		opts.StopTimeout = DefaultStopTimeout
 	}
 	httpClient := &http.Client{Timeout: 3 * time.Second}
 	httpClient.Transport = &http.Transport{
@@ -374,7 +387,8 @@ type AgentServerOptions struct {
 	Observe             func(context.Context, RunContext) (protocol.Observation, error)
 	Progress            func(context.Context, RunContext) (protocol.Progress, error)
 	Stop                func(context.Context, RunContext, Process) error
-	StopTimeout         time.Duration
+	// StopTimeout overrides DefaultStopTimeout when positive.
+	StopTimeout time.Duration
 	// MetricsURL proxies an external normalized endpoint; it cannot be combined
 	// with MetricsHandler or MetricParser.
 	MetricsURL string
@@ -400,7 +414,10 @@ type AgentServerOptions struct {
 	ResultFile                 string
 	Logger                     *log.Entry
 	ConfFileName               string
-	LabelsUsageLimit           int
+	// LabelsUsageLimit is the named request-label budget, excluding overflow.
+	// LoadAgentServerOptions uses metricschema.DefaultLabelLimit when label_limit
+	// is unset or empty. NewAgentServer preserves zero as an explicit budget.
+	LabelsUsageLimit int
 }
 
 func coordinatorRootCAs(caPEM string) (*x509.CertPool, error) {
@@ -455,7 +472,7 @@ func LoadAgentServerOptions(options AgentServerOptions) (AgentServerOptions, err
 			return AgentServerOptions{}, err
 		}
 	}
-	options.LabelsUsageLimit = 10
+	options.LabelsUsageLimit = metricschema.DefaultLabelLimit
 	if value := os.Getenv("label_limit"); value != "" {
 		limit, err := strconv.Atoi(value)
 		if err != nil {

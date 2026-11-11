@@ -49,10 +49,9 @@ func (sm ShibuyaMetric) LabelLength() int {
 	return len(sm.Label)
 }
 
-// Cortex has the limit for metric label values for 2048
-// We set the limit to half of it. 1024 is already pretty long for any valid label(test) names
+// LabelIsValid checks the request-label byte limit defined by metricschema.
 func (sm ShibuyaMetric) LabelIsValid() (bool, error) {
-	if sm.LabelLength() >= 1024 {
+	if sm.LabelLength() > metricschema.MaxRequestLabelBytes {
 		return false, errors.New("exceed max label length 1024")
 	}
 	return true, nil

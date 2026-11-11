@@ -16,8 +16,10 @@ import (
 	"github.com/reqfleet/engine-sdk/metricschema"
 )
 
-// Bound temporary parsing/aggregation memory independently of the named-label budget.
-const maxNativeMetricsBytes = 16 << 20
+// MaxNativeMetricsBytes is the maximum uncompressed Prometheus text snapshot size
+// accepted when FoldNativeMetrics is enabled. Larger snapshots return HTTP 502.
+// Default native proxying and MetricsHandler do not enforce this bound.
+const MaxNativeMetricsBytes = 16 << 20
 
 func (as *AgentServer) startMetricsRun(runID string) {
 	if as.options.MetricsHandler != nil {
@@ -47,12 +49,12 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	if encoding := response.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
 		return fmt.Errorf("unsupported upstream content encoding %q", encoding)
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxNativeMetricsBytes+1))
+	data, err := io.ReadAll(io.LimitReader(response.Body, MaxNativeMetricsBytes+1))
 	if err != nil {
 		return fmt.Errorf("reading upstream exposition: %w", err)
 	}
-	if len(data) > maxNativeMetricsBytes {
-		return fmt.Errorf("upstream exposition exceeds %d bytes", maxNativeMetricsBytes)
+	if len(data) > MaxNativeMetricsBytes {
+		return fmt.Errorf("upstream exposition exceeds %d bytes", MaxNativeMetricsBytes)
 	}
 	parser := expfmt.NewTextParser(model.LegacyValidation)
 	families, err := parser.TextToMetricFamilies(bytes.NewReader(data))

@@ -322,7 +322,7 @@ func TestNativeMetricsQuotedHistogramSamples(t *testing.T) {
 }
 
 func TestNativeMetricsInputBound(t *testing.T) {
-	source, _ := nativeSource(t, "# "+strings.Repeat("x", maxNativeMetricsBytes)+"\n")
+	source, _ := nativeSource(t, "# "+strings.Repeat("x", MaxNativeMetricsBytes)+"\n")
 	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1})
 	response := nativeResponse(as.metricsHandler())
 	assert.Equal(t, http.StatusBadGateway, response.Code)
