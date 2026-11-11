@@ -36,7 +36,8 @@
 // summaries to outlast individual observation probes without delaying readiness
 // or status requests. Their read-only RunContext remains valid until each callback
 // returns. Callbacks must honor context cancellation, including child processes.
-// They may cache engine-private summaries by RunID, but must not mutate the
+// Each Observe context is bounded by ObservationTimeout (five seconds).
+// Callbacks may cache engine-private summaries by RunID, but must not mutate the
 // supplied settings or artifact maps. BuildCommand is required; other hooks are
 // optional. Without Observe, a successful launch acknowledges readiness.
 //
@@ -49,15 +50,16 @@
 // lifecycle state or make the status endpoint unavailable. Progress payloads must
 // be valid JSON and identify their engine schema; aggregation belongs to the
 // coordinator. After canceling and joining the live monitors, the runtime captures
-// a final progress snapshot with a fresh two-second context. Adapters should reuse
-// cached summaries/checkpoints rather than restart canceled long-running work.
+// a final progress snapshot with a fresh context bounded by FinalProgressTimeout
+// (two seconds). Adapters should reuse cached summaries/checkpoints rather than
+// restart canceled long-running work.
 //
 // Stop targets a run and carries the coordinator's reason: scheduled completion
 // or cancellation. Preparation cancellation prevents launch. The runtime retains
 // ownership while callbacks roll back or terminate child processes. For a running
-// workload, Stop receives a fresh context bounded by StopTimeout (ten seconds by
-// default). Without Stop the runtime sends SIGTERM to the process group; after the
-// grace period it sends SIGKILL. Stop must honor its context and must not wait on
+// workload, Stop receives a fresh context bounded by StopTimeout (DefaultStopTimeout,
+// ten seconds, by default). Without Stop the runtime sends SIGTERM to the process
+// group; after the grace period it sends SIGKILL. Stop must honor its context and must not wait on
 // the primary process. The runtime reaps it, terminates remaining descendants and
 // joins all callbacks/readers before releasing the workspace for another run.
 //
@@ -78,8 +80,8 @@
 //
 // Runtime label admission uses AgentServerOptions.LabelsUsageLimit, not coordinator
 // run messages. LoadAgentServerOptions resolves the lowercase label_limit
-// environment variable (default 10 when unset or empty); MakeAgentServer uses the
-// same loader. NewAgentServer uses the resolved option directly, including zero.
+// environment variable (metricschema.DefaultLabelLimit, ten, when unset or empty);
+// MakeAgentServer uses the same loader. NewAgentServer preserves zero.
 // Adapters can initialize native exporters from those options before construction.
 // The SDK has no tier policy. Workloads inherit label_limit if present; Command.Env may override
 // it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce
@@ -96,8 +98,8 @@
 // FoldNativeMetrics explicitly enables last-resort SDK folding for URL-backed
 // native engines that cannot enforce the budget. It and NativeMetricsOverflowLabel
 // require MetricsURL and cannot be used with MetricsHandler or registry ingestion.
-// Folding buffers and parses each Prometheus text snapshot (at most 16 MiB),
-// validates safe aggregation, and re-encodes the result.
+// Folding buffers and parses each Prometheus text snapshot (at most
+// MaxNativeMetricsBytes, 16 MiB), validates safe aggregation, and re-encodes the result.
 // Invalid snapshots fail rather than bypassing admission. Admission is stable
 // across scrapes; colliding cumulative counters and histograms are aggregated
 // within each snapshot, not added again across snapshots. The producer must retain

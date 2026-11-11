@@ -386,7 +386,7 @@ func (as *AgentServer) observeRun(ctx context.Context, run *agentRun) {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		probeCtx, cancel := context.WithTimeout(ctx, ObservationTimeout)
 		observation, err := as.options.Observe(probeCtx, run.context)
 		cancel()
 		if ctx.Err() != nil {

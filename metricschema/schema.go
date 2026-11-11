@@ -1,6 +1,16 @@
-// Package metricschema defines the metric names and ordered labels of the
-// shibuya-v1 metrics contract without registering or depending on collectors.
+// Package metricschema defines the metric names, ordered labels and request-label
+// limits of the shibuya-v1 metrics contract without depending on collectors.
 package metricschema
+
+const (
+	// MaxRequestLabelBytes is the inclusive maximum request-label length in bytes,
+	// not characters. Labels of 1024 bytes or more are invalid.
+	MaxRequestLabelBytes = 1023
+	// DefaultLabelLimit is the default number of distinct named request labels
+	// per agent/run when label_limit is unset or empty. Overflow is additional.
+	// An explicitly configured zero budget is not replaced by this default.
+	DefaultLabelLimit = 10
+)
 
 const (
 	// RequestLatency is the request latency histogram, measured in milliseconds.

@@ -93,7 +93,8 @@ Set `FoldNativeMetrics: true` only when the engine cannot enforce its budget.
 This adds per-scrape buffering, parsing, validation, aggregation, and re-encoding
 cost, plus per-run admission state. Only this fallback requires Prometheus text
 exposition (`text/plain; version=0.0.4`): the SDK requests that format with
-`Accept-Encoding: identity` and bounds each successful snapshot to **16 MiB**.
+`Accept-Encoding: identity` and bounds each successful snapshot to
+`agent.MaxNativeMetricsBytes` (**16 MiB**).
 The following format and validation guarantees apply only with folding enabled.
 Compressed responses, malformed
 exposition, unsafe request-series aggregation, oversized snapshots, and non-200
@@ -142,10 +143,10 @@ A classic histogram's sample series are its `_bucket`, `_sum`, and `_count`
 components. The base family name is not itself a sample series. Preserve these
 historical names rather than adding `_total` or changing the byte-counter name.
 
-Request labels must be shorter than 1024 bytes in both ingestion modes. Parser
-errors and invalid labels drop the whole result-file event. With native folding
-enabled, invalid request labels reject the scrape; otherwise the engine must
-enforce this contract.
+Request labels must contain at most `metricschema.MaxRequestLabelBytes`
+(1023 bytes, not characters). Parser errors and invalid labels drop the whole
+result-file event. With native folding enabled, invalid request labels reject the
+scrape; otherwise the engine must enforce this contract.
 
 Use lowercase reserved labels `ttft` and `llm_resp` for optional LLM timing.
 The runtime routes `llm_resp` events into the separate wide histogram (its routing
@@ -161,7 +162,8 @@ Runtime admission is configured by the nonnegative
 `AgentServerOptions.LabelsUsageLimit`, not by coordinator run messages or the
 upload-preflight callback. `NewAgentServer` uses that option directly, including
 zero; `LoadAgentServerOptions` and `MakeAgentServer` resolve it from the lowercase
-`label_limit` environment variable (default 10 when unset or empty).
+`label_limit` environment variable (`metricschema.DefaultLabelLimit`, **10**,
+when unset or empty). This default counts named labels only, excluding overflow.
 Adapters can use the loader's resolved budget to initialize native exporters,
 then pass the same options to `NewAgentServer` without another environment read.
 See the [environment configuration contract](../AGENTS.md#resolve-deployment-options-before-construction)
