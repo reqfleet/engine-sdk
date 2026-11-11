@@ -78,6 +78,11 @@
 // See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
 //
+// Adapters ingesting request samples must validate labels with
+// ShibuyaMetric.LabelIsValid before admission and discard invalid samples without
+// truncation or partial metric updates. The [request-label validation contract]
+// defines whole-event rejection, zero-budget handling, and native scrape behavior.
+//
 // Runtime label admission uses AgentServerOptions.LabelsUsageLimit, not coordinator
 // run messages. LoadAgentServerOptions resolves the lowercase label_limit
 // environment variable (metricschema.DefaultLabelLimit, ten, when unset or empty);
@@ -118,4 +123,5 @@
 // guarantee runtime cardinality.
 //
 // [metrics contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md
+// [request-label validation contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md#request-label-validation
 package agent
