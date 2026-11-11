@@ -35,7 +35,7 @@ func TestMetricsIngestion(t *testing.T) {
 			return metric, err
 		},
 	})
-	as.labelsByRun[runID] = make(map[string]struct{})
+	as.startMetricsRun(runID)
 	as.makePromMetrics(metricEvent{runID: runID, line: `{"Label":"test-label","Status":"200","Latency":250,"EgressBytes":1024,"Threads":10}`})
 	gather := func() map[string]*dto.Metric {
 		t.Helper()
@@ -94,7 +94,7 @@ func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 			return metric, err
 		},
 	})
-	as.labelsByRun[runID] = make(map[string]struct{})
+	as.startMetricsRun(runID)
 	emit := func(run, label string) {
 		t.Helper()
 		line, err := json.Marshal(ShibuyaMetric{Label: label, Status: "200", Latency: 250})

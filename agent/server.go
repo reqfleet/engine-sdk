@@ -27,8 +27,6 @@ import (
 	"github.com/reqfleet/engine-sdk/protocol"
 )
 
-const labelOthers = "others"
-
 const (
 	// DefaultStopTimeout is the graceful-stop deadline used when StopTimeout is
 	// nonpositive. The runtime then escalates to SIGKILL.
@@ -88,13 +86,13 @@ type AgentServer struct {
 	requests chan agentRequest
 	// Label tracking
 	labelsLock       sync.RWMutex
-	labelsByRun      map[string]map[string]struct{}
+	labelsByRun      map[string]map[string]string
 	labelsUsageLimit int
 
 	// Native admission survives run completion for the final upstream scrape.
 	nativeMetricsLock sync.Mutex
 	nativeMetricsRun  string
-	nativeLabels      map[string]struct{}
+	nativeLabels      map[string]string
 
 	// Subscription status
 	subStausMu            sync.RWMutex
@@ -147,7 +145,7 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 		},
 	}
 	if opts.MetricsURL == "" && opts.MetricsHandler == nil {
-		as.labelsByRun = make(map[string]map[string]struct{})
+		as.labelsByRun = make(map[string]map[string]string)
 	}
 	return as
 }
@@ -179,15 +177,7 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 		log.Error(err)
 		return
 	}
-	// we limit the number of unique labels to avoid high cardinality in prometheus.
-	// If the label is new and we have reached the limit, we set it to "others"
-	if _, exists := labels[metric.Label]; metric.Label != labelOthers && !exists {
-		if len(labels) >= as.labelsUsageLimit {
-			metric.Label = labelOthers
-		} else {
-			labels[metric.Label] = struct{}{}
-		}
-	}
+	metric.Label = metricschema.AdmitRequestLabel(metric.Label, labels, as.labelsUsageLimit, "")
 	em := as.options.EngineMeta
 	metric.CollectionID = em.CollectionID
 	metric.PlanID = em.PlanID
@@ -543,7 +533,7 @@ func (as *AgentServer) validateMetricsOptions() error {
 	if options.MetricsHandler != nil {
 		return nil
 	}
-	if options.NativeMetricsOverflowLabel != "" && options.NativeMetricsOverflowLabel != labelOthers && options.NativeMetricsOverflowLabel != "_other_" {
+	if options.NativeMetricsOverflowLabel != "" && options.NativeMetricsOverflowLabel != metricschema.OverflowLabel && options.NativeMetricsOverflowLabel != "_other_" {
 		return fmt.Errorf("native metrics overflow label must be others or _other_")
 	}
 	target, err := url.Parse(options.MetricsURL)

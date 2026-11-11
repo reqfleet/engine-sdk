@@ -63,6 +63,9 @@ const (
 )
 
 const (
+	// OverflowLabel is the reserved request label for samples exceeding the
+	// named-label budget. It does not consume an admission slot.
+	OverflowLabel = "others"
 	// LLMResponseLabel selects the LLM response latency histogram.
 	LLMResponseLabel = "llm_resp"
 	// TTFTLabel identifies time-to-first-token measurements.

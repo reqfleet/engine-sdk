@@ -204,6 +204,22 @@ default proxying and `MetricsHandler` do not enforce them. Explicit
 `FoldNativeMetrics: true` enables SDK enforcement only for URL-backed native
 engines as a last-resort fallback.
 
+Adapters can share the SDK's admission policy with
+`metricschema.AdmitRequestLabel(sourceLabel, admitted, limit, overflowLabel)`.
+`metricschema.OverflowLabel` is the public `others` constant; pass an empty
+`overflowLabel` to select it, or `_other_` when that is the producer's convention.
+The configured overflow name is reserved and does not consume a slot.
+
+Create `admitted := make(map[string]string)` for each agent/run and use the
+resolved `options.LabelsUsageLimit` as `limit`. Validate the source sample first,
+then use the returned label for all of its request metrics. Serialize access
+alongside collector updates, keep the budget and overflow name fixed, and clear
+the map when resetting the run's metrics. Only admitted names are retained; new
+names are cloned so CSV substrings do not keep entire records alive.
+The helper does not validate samples or aggregate metrics. Native snapshot
+consumers must also preserve all-or-nothing admission on rejected scrapes;
+the SDK rolls back tentative new admissions if folding fails.
+
 Replay uses `metrics.max_labels` from its prepared `config.yaml`. Run preparation
 preserves that value rather than rewriting it from `label_limit`; no extra command
 environment override is added. SDK folding stays disabled for Replay. Positive
