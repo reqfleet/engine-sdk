@@ -143,11 +143,6 @@ A classic histogram's sample series are its `_bucket`, `_sum`, and `_count`
 components. The base family name is not itself a sample series. Preserve these
 historical names rather than adding `_total` or changing the byte-counter name.
 
-Request labels must contain at most `metricschema.MaxRequestLabelBytes`
-(1023 bytes, not characters). Parser errors and invalid labels drop the whole
-result-file event. With native folding enabled, invalid request labels reject the
-scrape; otherwise the engine must enforce this contract.
-
 Use lowercase reserved labels `ttft` and `llm_resp` for optional LLM timing.
 The runtime routes `llm_resp` events into the separate wide histogram (its routing
 comparison is case-insensitive, but reporting selectors use the lowercase label).
@@ -155,6 +150,36 @@ comparison is case-insensitive, but reporting selectors use the lowercase label)
 do not emit a fabricated zero timing. Status and byte counters still reflect the
 events the adapter records; synthetic timing events must not be assumed to be
 additional HTTP requests without understanding that adapter's event model.
+
+## Request-label validation
+
+Request labels must contain at most `metricschema.MaxRequestLabelBytes`
+(1023 bytes, not characters). Use `agent.ShibuyaMetric.LabelIsValid()` to check
+the byte length; adapter-specific requirements, such as a nonempty URL, remain
+separate.
+
+Validate the source request label **before admission or metric accumulation**.
+Do not truncate oversized labels, merge them into shorter prefixes, or send them
+to the overflow label. Invalid labels consume no admission slots. A zero named-label
+budget does not bypass validation: only valid labels may fold into overflow.
+
+Rejection scope depends on the integration:
+
+- **Result-file events:** the SDK drops the entire parsed `ShibuyaMetric` without
+  updating any collectors. Latency, status, bytes, and concurrency carried by that
+  event are all discarded. Parser errors also drop the whole event.
+- **Opt-in native folding:** an invalid request label rejects the entire scrape
+  with HTTP 502, without consuming admission slots. The SDK does not return a
+  partially accepted or cached snapshot.
+- **In-process handlers and default native proxying:** the SDK does not validate
+  labels or alter the producer's response. The adapter/exporter owns enforcement.
+  Adapters that ingest source request events or samples must use the same
+  whole-sample rejection rule before updating request metrics. Independently
+  reported samples, such as aggregate received bytes or live concurrency, remain
+  independent; do not discard them because another request sample was rejected.
+
+These are metrics-reporting rules, not limits on workload HTTP URLs or permission
+to execute requests. Rejecting a metric event does not cancel or fail the workload.
 
 ## Request-label budget
 
