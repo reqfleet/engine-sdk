@@ -239,22 +239,22 @@ func (as *AgentServer) reportOwnMetrics(interval time.Duration) error {
 			sampler.Reset()
 			sampledRunID = runID
 		}
-		sample, err := sampler.Sample()
+		sample, ok, err := sampler.Sample()
 		if err != nil {
 			return err
 		}
-		as.publishResourceMetrics(runID, sample)
+		as.publishResourceMetrics(runID, sample, ok)
 	}
 }
 
-func (as *AgentServer) publishResourceMetrics(runID string, sample resources.Sample) {
+func (as *AgentServer) publishResourceMetrics(runID string, sample resources.Sample, ok bool) {
 	meta := as.options.EngineMeta
-	if sample.CPUValid {
-		cpuGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(sample.CPUCores)
-	} else {
-		// A rebaseline must not leave an earlier rate looking like a current sample.
+	if !ok {
 		cpuGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
+		memGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
+		return
 	}
+	cpuGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(sample.CPUCores)
 	memGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(float64(sample.MemoryBytes))
 }
 

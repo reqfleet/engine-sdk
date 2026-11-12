@@ -30,12 +30,11 @@ func TestResourceMetricsOmitUnavailableRatesAndPreserveRunIdentity(t *testing.T)
 		}
 		return result
 	}
-	memoryOnly := resources.Sample{MemoryBytes: 8192}
-	server.publishResourceMetrics("first", memoryOnly)
-	assert.NotContains(t, gather(), metricschema.CPUGauge)
+	server.publishResourceMetrics("first", resources.Sample{}, false)
+	assert.Empty(t, gather(), "baseline-only attempts omit both resources")
 	server.publishResourceMetrics("first", resources.Sample{
-		CPUCores: 0.5, CPUValid: true, MemoryBytes: 8192,
-	})
+		CPUCores: 0.5, MemoryBytes: 8192,
+	}, true)
 	all := gather()
 	require.Contains(t, all, metricschema.CPUGauge)
 	cpu := all[metricschema.CPUGauge].Metric[0]
@@ -49,10 +48,16 @@ func TestResourceMetricsOmitUnavailableRatesAndPreserveRunIdentity(t *testing.T)
 		"collection_id": "collection", "plan_id": "plan", "run_id": "first", "zone": "zone", "engine_no": "engine",
 	}, labels)
 
-	server.publishResourceMetrics("second", memoryOnly)
+	server.publishResourceMetrics("second", resources.Sample{}, false)
 	all = gather()
 	require.Len(t, all[metricschema.CPUGauge].Metric, 1, "a new run must not inherit a rate")
-	require.Len(t, all[metricschema.MemoryGauge].Metric, 2, "retain the completed run's memory")
-	server.publishResourceMetrics("first", memoryOnly)
-	assert.NotContains(t, gather(), metricschema.CPUGauge, "a counter decrease must remove the stale rate")
+	require.Len(t, all[metricschema.MemoryGauge].Metric, 1, "a new baseline must not publish memory")
+	server.publishResourceMetrics("first", resources.Sample{}, false)
+	assert.Empty(t, gather(), "a counter decrease must remove both stale resource gauges")
+	server.publishResourceMetrics("second", resources.Sample{}, true)
+	all = gather()
+	require.Contains(t, all, metricschema.CPUGauge)
+	require.Contains(t, all, metricschema.MemoryGauge)
+	assert.Zero(t, all[metricschema.CPUGauge].Metric[0].GetGauge().GetValue())
+	assert.Zero(t, all[metricschema.MemoryGauge].Metric[0].GetGauge().GetValue())
 }

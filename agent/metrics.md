@@ -375,37 +375,40 @@ Calls are synchronous and safe to make concurrently, including alongside the SDK
 runtime. They start no workers, register no collectors, and require no coordinator.
 Missing, unreadable, or malformed files return errors, not successful zero samples.
 
-Use a zero-valued `resources.Sampler` and call `Sample()` to obtain a
-`resources.Sample` plus an error. The sampler implements these rules:
+Use a zero-valued `resources.Sampler` and call `Sample()` to obtain
+`(sample resources.Sample, ok bool, err error)`. A sample contains only CPU cores
+and memory bytes; there are no per-resource validity flags. The sampler implements
+these rules:
 
 - `CPUCores` is the cumulative CPU microsecond delta divided by actual elapsed
   wall-clock microseconds, retaining sub-microsecond elapsed precision. Timestamps
   come from Go's monotonic `time.Now`; the configured polling interval is not the
   denominator. An unchanged successful counter produces a genuine zero rate.
-- `CPUValid` is false on the first successful sample, including a zero counter.
-  A decreasing counter establishes a new baseline and omits CPU for that sample,
-  without unsigned underflow. Nonpositive elapsed time returns an error and does
-  not advance the baseline.
+- The first successful read, including a zero CPU counter, establishes a baseline
+  and returns `ok=false` with no error and a zero sample. A decreasing counter
+  re-establishes that baseline the same way, without unsigned underflow. Both CPU
+  and memory are skipped for that attempt. Nonpositive elapsed time returns an
+  error and does not advance the baseline.
 - Sampling stops at the first read error, which identifies the resource and wraps
-  the underlying error. Any sampling error returns a zero `Sample` and leaves the
-  CPU baseline unchanged. Callers must discard the entire sample without
-  publishing it. The next successful CPU rate spans from the last successful
+  the underlying error. Any sampling error returns a zero `Sample`, `ok=false`,
+  and leaves the CPU baseline unchanged. Callers must discard the entire sample
+  without publishing it. The next complete sample spans from the last successful
   baseline, not the failed attempt.
-- On success, `MemoryBytes` is always reportable, including on the first sample
-  and after a counter decrease when `CPUValid` is false.
+- When `ok` is true and the error is nil, both `CPUCores` and `MemoryBytes` are
+  reportable, including genuine zero usage.
 - Call `Reset()` at each run boundary; it discards the CPU baseline. The runtime
   does this before sampling a different active run.
 
-`CPUValid: false` on a successful sample means unavailable, not zero. Omit CPU,
-including any previously published rate after a counter decrease; do not present
-stale rates as new measurements. Always check the sampling error before updating
-any resource gauges. The runtime retains its existing fatal resource-error policy;
-k6 fails the scrape rather than publishing measurements from a failed attempt.
+An unavailable sample (`ok=false`, no error) is not a zero-usage measurement.
+Omit both resource series, including previous values after a counter decrease;
+do not present stale values as a new sample. Always check the error before updating
+any gauges. The runtime retains its existing fatal resource-error policy; k6
+fails the scrape rather than publishing measurements from a failed attempt.
 
 `Sample` and `Reset` are synchronized; do not copy a sampler after first use.
 The sampler starts no workers and owns no Prometheus collectors. Exporters own
 scrape scheduling, shutdown, and serialization of run identity, reset and
-publication. Publish successful `CPUCores` (when `CPUValid`) and `MemoryBytes` as `metricschema.CPUGauge`
+publication. Publish both values from an available sample as `metricschema.CPUGauge`
 and `metricschema.MemoryGauge`, with `metricschema.ResourceLabels` from resolved
 `EngineMeta` and the current `RunContext.RunID`. Sampling does not automatically
 add resource families to a `MetricsHandler` or `MetricsURL` response.

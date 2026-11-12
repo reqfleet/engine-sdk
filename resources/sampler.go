@@ -12,15 +12,10 @@ import (
 	"github.com/reqfleet/engine-sdk/containerstats"
 )
 
-// Sample contains container resource measurements from a successful sampling
-// attempt. CPUValid is false when the sample establishes a baseline rather than
-// a rate; consumers must omit any previously published CPU rate in that case.
-// MemoryBytes is always available and includes cgroup-accounted cache.
+// Sample contains a complete container resource measurement. CPUCores is an
+// average CPU rate; MemoryBytes includes cgroup-accounted cache.
 type Sample struct {
-	CPUCores float64
-	// CPUValid distinguishes an available rate (including zero) from a baseline
-	// sample.
-	CPUValid    bool
+	CPUCores    float64
 	MemoryBytes uint64
 }
 
@@ -42,24 +37,24 @@ type Sampler struct {
 	now             func() time.Time
 }
 
-// Reset discards the CPU baseline. The next successful sample reports memory
-// but no CPU rate, even if the cgroup counter has not reset between runs.
+// Reset discards the CPU baseline. The next successful read only establishes a
+// new baseline and produces no sample.
 func (s *Sampler) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cpuMicros, s.cpuAt, s.cpuStarted = 0, time.Time{}, false
 }
 
-// Sample reads resources synchronously. The first successful sample and a
-// decreasing CPU counter establish a baseline without producing a CPU rate.
-// Subsequent rates use actual elapsed monotonic time, not a polling interval.
+// Sample reads resources synchronously. It returns ok=false with no error when
+// establishing a baseline after first use, Reset, or a decreasing CPU counter.
+// No CPU or memory measurement is returned for that attempt.
+// Subsequent samples use actual elapsed monotonic time, not a polling interval.
 // A nonpositive interval returns an error without changing the baseline.
 //
-// Any error returns a zero Sample and leaves the CPU baseline unchanged; callers
-// must discard the sample without publishing it. Read errors identify the failing
-// resource and wrap its error. On success, memory is available even when CPUValid
-// is false.
-func (s *Sampler) Sample() (Sample, error) {
+// Any error returns a zero Sample and ok=false and leaves the CPU baseline
+// unchanged. Callers must not publish unavailable or failed samples. Read errors
+// identify the failing resource and wrap its error.
+func (s *Sampler) Sample() (sample Sample, ok bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	readCPU, readMemory, now := s.readCPUUsage, s.readMemoryUsage, s.now
@@ -74,25 +69,23 @@ func (s *Sampler) Sample() (Sample, error) {
 	}
 	cpuMicros, err := readCPU()
 	if err != nil {
-		return Sample{}, fmt.Errorf("CPU usage: %w", err)
+		return Sample{}, false, fmt.Errorf("CPU usage: %w", err)
 	}
 	at := now()
 	memoryBytes, err := readMemory()
 	if err != nil {
-		return Sample{}, fmt.Errorf("memory usage: %w", err)
+		return Sample{}, false, fmt.Errorf("memory usage: %w", err)
 	}
-	sample := Sample{MemoryBytes: memoryBytes}
 	if !s.cpuStarted || cpuMicros < s.cpuMicros {
 		s.cpuMicros, s.cpuAt, s.cpuStarted = cpuMicros, at, true
-		return sample, nil
+		return Sample{}, false, nil
 	}
 	elapsed := at.Sub(s.cpuAt)
 	if elapsed <= 0 {
-		return Sample{}, errors.New("CPU sampling interval must be positive")
+		return Sample{}, false, errors.New("CPU sampling interval must be positive")
 	}
 	// Preserve sub-microsecond elapsed precision rather than truncating Duration.
-	sample.CPUCores = float64(cpuMicros-s.cpuMicros) / (float64(elapsed) / float64(time.Microsecond))
-	sample.CPUValid = true
+	cores := float64(cpuMicros-s.cpuMicros) / (float64(elapsed) / float64(time.Microsecond))
 	s.cpuMicros, s.cpuAt = cpuMicros, at
-	return sample, nil
+	return Sample{CPUCores: cores, MemoryBytes: memoryBytes}, true, nil
 }

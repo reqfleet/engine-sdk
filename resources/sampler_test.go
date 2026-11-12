@@ -25,11 +25,12 @@ func newTestSampler() (*Sampler, *samplerSource) {
 	}, source
 }
 
-func TestSamplerUsesElapsedTimeAndReportsMemoryBeforeCPU(t *testing.T) {
+func TestSamplerUsesElapsedTimeAndSkipsBaseline(t *testing.T) {
 	sampler, source := newTestSampler()
-	sample, err := sampler.Sample()
+	sample, ok, err := sampler.Sample()
 	require.NoError(t, err)
-	assert.Equal(t, Sample{MemoryBytes: 8192}, sample)
+	assert.False(t, ok)
+	assert.Equal(t, Sample{}, sample)
 
 	for _, step := range []struct {
 		elapsed time.Duration
@@ -43,9 +44,10 @@ func TestSamplerUsesElapsedTimeAndReportsMemoryBeforeCPU(t *testing.T) {
 	} {
 		source.cpu += step.cpu
 		source.at = source.at.Add(step.elapsed)
-		sample, err = sampler.Sample()
+		sample, ok, err = sampler.Sample()
 		require.NoError(t, err)
-		assert.Equal(t, Sample{CPUCores: step.cores, CPUValid: true, MemoryBytes: 8192}, sample)
+		assert.True(t, ok)
+		assert.Equal(t, Sample{CPUCores: step.cores, MemoryBytes: 8192}, sample)
 	}
 }
 
@@ -54,13 +56,13 @@ func TestSamplerRebaselinesOnResetAndCounterDecrease(t *testing.T) {
 		t.Run(boundary, func(t *testing.T) {
 			sampler, source := newTestSampler()
 			source.cpu = 5_000_000
-			_, err := sampler.Sample()
+			_, _, err := sampler.Sample()
 			require.NoError(t, err)
 			source.at = source.at.Add(time.Second)
 			source.cpu += 1_000_000
-			sample, err := sampler.Sample()
+			sample, ok, err := sampler.Sample()
 			require.NoError(t, err)
-			require.True(t, sample.CPUValid)
+			require.True(t, ok)
 			if boundary == "reset" {
 				sampler.Reset()
 				source.cpu += 100_000_000 // Idle usage must not leak into the new run.
@@ -68,15 +70,15 @@ func TestSamplerRebaselinesOnResetAndCounterDecrease(t *testing.T) {
 				source.cpu = 0
 			}
 			source.at = source.at.Add(10 * time.Second)
-			sample, err = sampler.Sample()
+			sample, ok, err = sampler.Sample()
 			require.NoError(t, err)
-			assert.False(t, sample.CPUValid)
-			assert.Equal(t, uint64(8192), sample.MemoryBytes)
+			assert.False(t, ok)
+			assert.Equal(t, Sample{}, sample)
 			source.cpu += 250_000
 			source.at = source.at.Add(500 * time.Millisecond)
-			sample, err = sampler.Sample()
+			sample, ok, err = sampler.Sample()
 			require.NoError(t, err)
-			assert.True(t, sample.CPUValid)
+			assert.True(t, ok)
 			assert.Equal(t, 0.5, sample.CPUCores)
 		})
 	}
@@ -96,14 +98,15 @@ func TestSamplerReadFailuresDiscardSampleAndPreserveBaseline(t *testing.T) {
 				sampler, source := newTestSampler()
 				source.cpu = 1_000_000
 				if !initial {
-					_, err := sampler.Sample()
+					_, _, err := sampler.Sample()
 					require.NoError(t, err)
 				}
 				source.cpu += 1_000_000
 				source.at = source.at.Add(time.Second)
 				source.cpuErr, source.memoryErr = failure.cpuErr, failure.memoryErr
-				sample, err := sampler.Sample()
+				sample, ok, err := sampler.Sample()
 				require.Error(t, err)
+				assert.False(t, ok)
 				if failure.cpuErr != nil {
 					assert.ErrorIs(t, err, cpuFailure)
 					assert.Contains(t, err.Error(), "CPU usage")
@@ -115,12 +118,13 @@ func TestSamplerReadFailuresDiscardSampleAndPreserveBaseline(t *testing.T) {
 				assert.Equal(t, Sample{}, sample, "failed attempts must not expose partial measurements")
 				source.cpuErr, source.memoryErr = nil, nil
 				source.at = source.at.Add(time.Second)
-				sample, err = sampler.Sample()
+				sample, ok, err = sampler.Sample()
 				require.NoError(t, err)
-				assert.Equal(t, uint64(8192), sample.MemoryBytes)
-				assert.Equal(t, !initial, sample.CPUValid)
-				if !initial {
-					assert.Equal(t, 0.5, sample.CPUCores, "recovery uses the last successful baseline")
+				assert.Equal(t, !initial, ok)
+				if initial {
+					assert.Equal(t, Sample{}, sample)
+				} else {
+					assert.Equal(t, Sample{CPUCores: 0.5, MemoryBytes: 8192}, sample, "recovery uses the last successful baseline")
 				}
 			})
 		}
@@ -132,17 +136,18 @@ func TestSamplerRejectsNonpositiveTimeWithoutAdvancingBaseline(t *testing.T) {
 		t.Run(elapsed.String(), func(t *testing.T) {
 			sampler, source := newTestSampler()
 			baseline := source.at
-			_, err := sampler.Sample()
+			_, _, err := sampler.Sample()
 			require.NoError(t, err)
 			source.cpu = 1_000_000
 			source.at = baseline.Add(elapsed)
-			sample, err := sampler.Sample()
+			sample, ok, err := sampler.Sample()
 			require.ErrorContains(t, err, "interval must be positive")
+			assert.False(t, ok)
 			assert.Equal(t, Sample{}, sample)
 			source.at = baseline.Add(2 * time.Second)
-			sample, err = sampler.Sample()
+			sample, ok, err = sampler.Sample()
 			require.NoError(t, err)
-			assert.True(t, sample.CPUValid)
+			assert.True(t, ok)
 			assert.Equal(t, 0.5, sample.CPUCores)
 		})
 	}
