@@ -5,3 +5,9 @@ This distribution contains source derived from reqfleet/shibuya,
 revision a07d9b52b033678746464db9d34a5a52d2198475.
 The extracted source is licensed under the Apache License, Version 2.0.
 Modified extracted files are marked in their source headers.
+
+conformance/ is derived from the Apache-2.0 shared harness in
+https://github.com/reqfleet/engine-adapters,
+revision 84054fec1fd09597206d71968d61dd418ae0783f.
+Copyright reqfleet contributors.
+Modified for the public SDK testing toolkit.

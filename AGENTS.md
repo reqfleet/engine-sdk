@@ -60,6 +60,7 @@ adapter is supplied here.
 | [`containerstats`](containerstats) | Raw cgroup CPU/memory readers backed by `internal/containerstats`; no rate calculation or run lifecycle policy |
 | [`resources`](resources) | Synchronized `Sampler` for CPU rates, memory bytes and run reset, shared by the runtime and adapter-owned exporters; see the [resource metrics contract](agent/metrics.md#runtime-resource-metrics) |
 | [`validation`](validation/doc.go) | Synchronous upload-validation contract, structured diagnostics, and result checks; not part of agent execution |
+| [`conformance`](conformance/doc.go) | Optional adapter-testing toolkit: normalized metric assertions and Linux/container-only lifecycle, artifact, authentication and budget scenarios; never imported by the runtime |
 | [`examples/jsonvalidator`](examples/jsonvalidator) | Working JSON request-plan validator using only standard-library and public SDK dependencies |
 | [`internal`](internal) | SDK-only artifact transport, subscriptions, and cgroup reader implementation |
 
@@ -446,6 +447,22 @@ GOWORK=off go test -race -count=1 ./...
 GOWORK=off go list -deps -test -json ./...
 GOWORK=off go list -m -json all
 ```
+
+The optional [`conformance`](conformance/doc.go) package exposes the shared
+adapter test harness. Metrics assertions work in ordinary unit tests; runtime
+helpers and regressions require `-tags=integration`, Linux, and a disposable
+container. Run `make test-toolkit` to build and execute the SDK's shared runtime
+regressions with no host mounts, published ports, or external network. The root
+harness launches adapters and workloads as UID/GID 65532.
+
+External adapters import `github.com/reqfleet/engine-sdk/conformance` from their
+tests and supply the real executable, artifacts/settings, controlled target,
+completion/reuse and label-budget fixtures, and independent native-output metric
+expectations. Keep engine plans, parsing, dependency/version policy and error
+mapping in the adapter repository. Build the shared regression binary and the
+adapter's own integration binary into its conformance image and run both.
+See the package documentation for public extension points and cleanup guarantees.
+These checks do not establish control-plane deployment compatibility.
 
 Existing behavior tests show the repository's conventions:
 
