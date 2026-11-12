@@ -1,24 +1,34 @@
-package containerstats
+// Package resources normalizes container resource readings for the SDK runtime
+// and adapter exporters. It owns CPU-rate sampling and reset policy; raw cgroup
+// access remains in package containerstats. It has no Prometheus dependency.
+package resources
 
 import (
 	"errors"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/reqfleet/engine-sdk/containerstats"
 )
 
 // Sample contains container resource measurements. A false validity flag means
 // unavailable, not zero; consumers must omit that measurement, including any
 // previously published CPU rate. MemoryBytes includes cgroup-accounted cache.
 type Sample struct {
-	CPUCores    float64
+	CPUCores float64
+	// CPUValid distinguishes an available rate (including zero) from a baseline
+	// sample or failed measurement.
 	CPUValid    bool
 	MemoryBytes uint64
+	// MemoryValid reports a successful memory read, independently of CPUValid
+	// and the combined sampling error.
 	MemoryValid bool
 }
 
 // Sampler converts cumulative cgroup CPU microseconds into average CPU cores.
-// Its zero value is ready to use with ReadCPUUsage, ReadMemoryUsage and time.Now.
+// Its zero value uses containerstats.ReadCPUUsage, containerstats.ReadMemoryUsage
+// and time.Now.
 // It starts no workers and has no dependency on a metrics registry.
 //
 // Sample and Reset are safe to call concurrently. Do not copy a Sampler after
@@ -57,10 +67,10 @@ func (s *Sampler) Sample() (Sample, error) {
 	defer s.mu.Unlock()
 	readCPU, readMemory, now := s.readCPUUsage, s.readMemoryUsage, s.now
 	if readCPU == nil {
-		readCPU = ReadCPUUsage
+		readCPU = containerstats.ReadCPUUsage
 	}
 	if readMemory == nil {
-		readMemory = ReadMemoryUsage
+		readMemory = containerstats.ReadMemoryUsage
 	}
 	if now == nil {
 		now = time.Now

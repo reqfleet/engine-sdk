@@ -1,4 +1,4 @@
-// Package containerstats samples Linux container CPU and memory usage from cgroup
+// Package containerstats reads Linux container CPU and memory usage from cgroup
 // v1 or v2 files. It has no dependency on the agent runtime or Prometheus.
 //
 // The readers measure the cgroup visible at /sys/fs/cgroup, including all
@@ -11,9 +11,6 @@
 // The version is detected once, on first use. Both readers are safe for
 // concurrent calls, start no background work, and return errors when the files
 // cannot be read or parsed, including on systems without these Linux files.
-//
-// Sampler shares CPU-rate calculation, run reset and partial availability rules
-// between the runtime and adapter exporters. Its zero value is ready to use.
 package containerstats
 
 import internalstats "github.com/reqfleet/engine-sdk/internal/containerstats"

@@ -84,7 +84,7 @@ loopback proxy is needed. `ResultFile` may still name workload output without
 release containing it before removing an adapter's listener/`MetricsURL` wiring.
 
 Custom exporters can reuse the public
-[`containerstats.Sampler`](containerstats/sampler.go) to sample Linux cgroup CPU
+[`resources.Sampler`](resources/sampler.go) to sample Linux cgroup CPU
 cores and memory bytes without importing the agent runtime or Prometheus. The SDK
 runtime uses the same sampler, including elapsed-time calculation, run reset and
 partial availability semantics. See the

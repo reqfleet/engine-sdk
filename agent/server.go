@@ -20,11 +20,11 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/hpcloud/tail"
-	"github.com/reqfleet/engine-sdk/containerstats"
 	"github.com/reqfleet/engine-sdk/internal/coordinator"
 	"github.com/reqfleet/engine-sdk/internal/pubsub"
 	"github.com/reqfleet/engine-sdk/metricschema"
 	"github.com/reqfleet/engine-sdk/protocol"
+	"github.com/reqfleet/engine-sdk/resources"
 )
 
 const (
@@ -227,7 +227,7 @@ func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
 }
 
 func (as *AgentServer) reportOwnMetrics(interval time.Duration) error {
-	var sampler containerstats.Sampler
+	var sampler resources.Sampler
 	var sampledRunID string
 	for {
 		time.Sleep(interval)
@@ -247,7 +247,7 @@ func (as *AgentServer) reportOwnMetrics(interval time.Duration) error {
 	}
 }
 
-func (as *AgentServer) publishResourceMetrics(runID string, sample containerstats.Sample) {
+func (as *AgentServer) publishResourceMetrics(runID string, sample resources.Sample) {
 	meta := as.options.EngineMeta
 	if sample.CPUValid {
 		cpuGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(sample.CPUCores)

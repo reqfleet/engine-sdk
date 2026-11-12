@@ -356,8 +356,8 @@ Native endpoints and in-process handlers provide these resource metrics in
 their own Prometheus exposition; the SDK does not merge its registry.
 
 The runtime and adapter-owned exporters share a synchronous resource sampler
-from `github.com/reqfleet/engine-sdk/containerstats`. The underlying readers remain
-available for consumers that need raw counters:
+from `github.com/reqfleet/engine-sdk/resources`. Sampling policy is separate from
+`github.com/reqfleet/engine-sdk/containerstats`, which provides raw cgroup readers:
 
 - `containerstats.ReadCPUUsage() (uint64, error)` returns cumulative CPU time in
   **microseconds**, normalized across cgroup v1 and v2. V1's nanosecond counter is
@@ -375,8 +375,8 @@ Calls are synchronous and safe to make concurrently, including alongside the SDK
 runtime. They start no workers, register no collectors, and require no coordinator.
 Missing, unreadable, or malformed files return errors, not successful zero samples.
 
-Use a zero-valued `containerstats.Sampler` and call `Sample()` to obtain a
-`containerstats.Sample` plus an error. The sampler implements these rules:
+Use a zero-valued `resources.Sampler` and call `Sample()` to obtain a
+`resources.Sample` plus an error. The sampler implements these rules:
 
 - `CPUCores` is the cumulative CPU microsecond delta divided by actual elapsed
   wall-clock microseconds, retaining sub-microsecond elapsed precision. Timestamps

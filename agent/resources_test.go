@@ -5,8 +5,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-	"github.com/reqfleet/engine-sdk/containerstats"
 	"github.com/reqfleet/engine-sdk/metricschema"
+	"github.com/reqfleet/engine-sdk/resources"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,10 +30,10 @@ func TestResourceMetricsOmitUnavailableRatesAndPreserveRunIdentity(t *testing.T)
 		}
 		return result
 	}
-	memoryOnly := containerstats.Sample{MemoryBytes: 8192, MemoryValid: true}
+	memoryOnly := resources.Sample{MemoryBytes: 8192, MemoryValid: true}
 	server.publishResourceMetrics("first", memoryOnly)
 	assert.NotContains(t, gather(), metricschema.CPUGauge)
-	server.publishResourceMetrics("first", containerstats.Sample{
+	server.publishResourceMetrics("first", resources.Sample{
 		CPUCores: 0.5, CPUValid: true, MemoryBytes: 8192, MemoryValid: true,
 	})
 	all := gather()
@@ -55,6 +55,6 @@ func TestResourceMetricsOmitUnavailableRatesAndPreserveRunIdentity(t *testing.T)
 	require.Len(t, all[metricschema.MemoryGauge].Metric, 2, "retain the completed run's memory")
 	server.publishResourceMetrics("first", memoryOnly)
 	assert.NotContains(t, gather(), metricschema.CPUGauge, "a counter decrease must remove the stale rate")
-	server.publishResourceMetrics("second", containerstats.Sample{})
+	server.publishResourceMetrics("second", resources.Sample{})
 	require.Len(t, gather()[metricschema.MemoryGauge].Metric, 1, "failed memory must not retain a stale value")
 }

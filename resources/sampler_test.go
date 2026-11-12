@@ -1,4 +1,4 @@
-package containerstats
+package resources
 
 import (
 	"errors"
