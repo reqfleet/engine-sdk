@@ -1,5 +1,5 @@
-// Package metricschema defines metric names, ordered Prometheus labels, and
-// request-name admission for the shibuya-v1 contract without depending on collectors.
+// Package metricschema defines metric names, ordered Prometheus labels, histogram
+// boundaries, and request-name admission for shibuya-v1 without depending on collectors.
 package metricschema
 
 const (
@@ -100,4 +100,23 @@ func ThreadsLabels() []string {
 // ResourceLabels returns a fresh, caller-owned slice of ordered CPU and memory labels.
 func ResourceLabels() []string {
 	return []string{LabelCollectionID, LabelPlanID, LabelRunID, LabelZone, LabelEngineNo}
+}
+
+// RequestLatencyBuckets returns a fresh, caller-owned slice of the ordinary
+// request histogram's finite upper bounds in milliseconds, in increasing order.
+// Configure collectors once with these bounds, not per observation. Prometheus
+// adds the implicit +Inf bucket; exposition validators must append it themselves.
+func RequestLatencyBuckets() []float64 {
+	return []float64{1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
+}
+
+// LLMResponseLatencyBuckets returns a fresh, caller-owned slice of the LLM
+// response histogram's finite upper bounds in milliseconds, in increasing order.
+// Configure collectors once with these bounds, not per observation. Prometheus
+// adds the implicit +Inf bucket; exposition validators must append it themselves.
+func LLMResponseLatencyBuckets() []float64 {
+	return []float64{
+		100, 250, 500, 1000, 2500, 5000, 7500, 10000, 15000, 20000,
+		30000, 45000, 60000, 90000, 120000, 180000, 300000,
+	}
 }
