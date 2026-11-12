@@ -210,12 +210,14 @@ Adapters can share the SDK's admission policy with
 `overflowLabel` to select it, or `_other_` when that is the producer's convention.
 The configured overflow name is reserved and does not consume a slot.
 
-Create `admitted := make(map[string]string)` for each agent/run and use the
+Create `admitted := make(map[string]struct{})` for each agent/run and use the
 resolved `options.LabelsUsageLimit` as `limit`. Validate the source sample first,
 then use the returned label for all of its request metrics. Serialize access
 alongside collector updates, keep the budget and overflow name fixed, and clear
 the map when resetting the run's metrics. Only admitted names are retained; new
-names are cloned so CSV substrings do not keep entire records alive.
+map keys are cloned so the admission set does not keep entire CSV records alive.
+For an already-admitted name, the helper returns the input string unchanged;
+callers retaining that result own its backing-storage lifetime.
 The helper does not validate samples or aggregate metrics. Native snapshot
 consumers must also preserve all-or-nothing admission on rejected scrapes;
 the SDK rolls back tentative new admissions if folding fails.

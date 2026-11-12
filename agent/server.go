@@ -86,13 +86,13 @@ type AgentServer struct {
 	requests chan agentRequest
 	// Label tracking
 	labelsLock       sync.RWMutex
-	labelsByRun      map[string]map[string]string
+	labelsByRun      map[string]map[string]struct{}
 	labelsUsageLimit int
 
 	// Native admission survives run completion for the final upstream scrape.
 	nativeMetricsLock sync.Mutex
 	nativeMetricsRun  string
-	nativeLabels      map[string]string
+	nativeLabels      map[string]struct{}
 
 	// Subscription status
 	subStausMu            sync.RWMutex
@@ -145,7 +145,7 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 		},
 	}
 	if opts.MetricsURL == "" && opts.MetricsHandler == nil {
-		as.labelsByRun = make(map[string]map[string]string)
+		as.labelsByRun = make(map[string]map[string]struct{})
 	}
 	return as
 }

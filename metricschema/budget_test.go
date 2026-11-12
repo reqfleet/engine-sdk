@@ -14,29 +14,29 @@ func TestAdmitRequestLabel(t *testing.T) {
 		overflow string
 		input    []string
 		want     []string
-		admitted map[string]string
+		admitted map[string]struct{}
 	}{
 		{
 			name: "stable names and reserved overflow", limit: 2,
 			input:    []string{"others", "z", "a", "b", "z", "b", "a"},
 			want:     []string{"others", "z", "a", "others", "z", "others", "a"},
-			admitted: map[string]string{"z": "z", "a": "a"},
+			admitted: map[string]struct{}{"z": {}, "a": {}},
 		},
 		{
 			name: "zero budget", limit: 0,
 			input:    []string{"a", "others", "a", "b"},
 			want:     []string{"others", "others", "others", "others"},
-			admitted: map[string]string{},
+			admitted: map[string]struct{}{},
 		},
 		{
 			name: "custom overflow reserves only its own spelling", limit: 1, overflow: "_other_",
 			input:    []string{"_other_", "others", "a", "others"},
 			want:     []string{"_other_", "others", "_other_", "others"},
-			admitted: map[string]string{"others": "others"},
+			admitted: map[string]struct{}{"others": {}},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			admitted := make(map[string]string)
+			admitted := make(map[string]struct{})
 			for i, label := range test.input {
 				assert.Equal(t, test.want[i], metricschema.AdmitRequestLabel(label, admitted, test.limit, test.overflow))
 			}
@@ -46,7 +46,7 @@ func TestAdmitRequestLabel(t *testing.T) {
 }
 
 func TestAdmitRequestLabelRunReset(t *testing.T) {
-	admitted := make(map[string]string)
+	admitted := make(map[string]struct{})
 	assert.Equal(t, "old", metricschema.AdmitRequestLabel("old", admitted, 1, ""))
 	assert.Equal(t, metricschema.OverflowLabel, metricschema.AdmitRequestLabel("new", admitted, 1, ""))
 	clear(admitted)

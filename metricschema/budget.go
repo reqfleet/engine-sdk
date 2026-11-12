@@ -12,27 +12,27 @@ import "strings"
 // access, validate source labels before admission, and apply the returned label
 // consistently to every metric belonging to the same sample.
 //
-// Only admitted names are retained, not overflow sources. New names are cloned so
-// a label sliced from a larger CSV record cannot retain that record. Repeated and
-// overflow labels do not allocate. This helper does not validate or aggregate
-// samples, select an engine's budget, or provide transactional batch admission.
-func AdmitRequestLabel(label string, admitted map[string]string, limit int, overflowLabel string) string {
+// Only admitted names are retained, not overflow sources. New map keys are cloned
+// so the set cannot retain a larger CSV record. Already-admitted labels are
+// returned unchanged; callers retaining the result own its backing-storage lifetime.
+// Repeated and overflow labels do not allocate. This helper does not validate or
+// aggregate samples, select a budget, or provide transactional batch admission.
+func AdmitRequestLabel(label string, admitted map[string]struct{}, limit int, overflowLabel string) string {
 	if overflowLabel == "" {
 		overflowLabel = OverflowLabel
 	}
 	if label == overflowLabel {
 		return overflowLabel
 	}
-	if existing, ok := admitted[label]; ok {
-		return existing
+	if _, ok := admitted[label]; ok {
+		return label
 	}
 	if len(admitted) >= limit {
 		return overflowLabel
 	}
-	// CSV fields can share an entire record's backing allocation. Clone only
-	// newly admitted labels, then retain the clone as the value so later lookups
-	// reuse it instead of returning a field backed by another CSV record.
+	// CSV fields can share an entire record's backing allocation. Store only
+	// a detached key; admission needs membership, not a duplicate string value.
 	label = strings.Clone(label)
-	admitted[label] = label
+	admitted[label] = struct{}{}
 	return label
 }

@@ -27,12 +27,12 @@ func (as *AgentServer) startMetricsRun(runID string) {
 	}
 	if as.options.MetricsURL == "" {
 		as.labelsLock.Lock()
-		as.labelsByRun[runID] = make(map[string]string)
+		as.labelsByRun[runID] = make(map[string]struct{})
 		as.labelsLock.Unlock()
 	} else if as.options.FoldNativeMetrics {
 		as.nativeMetricsLock.Lock()
 		as.nativeMetricsRun = runID
-		as.nativeLabels = make(map[string]string)
+		as.nativeLabels = make(map[string]struct{})
 		as.nativeMetricsLock.Unlock()
 	}
 }
