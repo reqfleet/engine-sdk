@@ -72,6 +72,18 @@ example](AGENTS.md#resolve-deployment-options-before-construction).
 This API is unreleased and is not included in `v0.3.0`; adapters must pin a
 published release containing it before removing their local environment parsers.
 
+Adapters that ingest independent samples can update SDK-owned collectors through
+`agent.MetricsRegistry`: request latency/status, received bytes, and concurrency
+have separate recording methods. Supply the registry through `AgentServerOptions`
+and use `WrapMetricsHandler` to drain output and synchronize scrapes. The SDK owns
+metric definitions, HTTP exposition, and container resource sampling; no
+adapter-owned collectors or resource reporter are needed. See the
+[registry contract](agent/metrics.md#sdk-owned-registry).
+
+This unreleased API replaces `ShibuyaMetric.ToPrometheus()` with
+`MetricsRegistry.RecordEvent`. Existing `MetricParser` callbacks and native
+`MetricsURL` integrations remain supported without adapter changes.
+
 Adapters with an in-process normalized exporter can pass its `http.Handler` as
 `AgentServerOptions.MetricsHandler`, with
 `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`. The SDK serves it directly

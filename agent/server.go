@@ -24,7 +24,6 @@ import (
 	"github.com/reqfleet/engine-sdk/internal/pubsub"
 	"github.com/reqfleet/engine-sdk/metricschema"
 	"github.com/reqfleet/engine-sdk/protocol"
-	"github.com/reqfleet/engine-sdk/resources"
 )
 
 const (
@@ -84,6 +83,7 @@ type AgentServer struct {
 	// Concurrent access fields
 	bus      chan metricEvent
 	requests chan agentRequest
+	metrics  *MetricsRegistry
 	// Label tracking
 	labelsLock       sync.RWMutex
 	labelsByRun      map[string]map[string]struct{}
@@ -146,6 +146,10 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 	}
 	if opts.MetricsURL == "" && opts.MetricsHandler == nil {
 		as.labelsByRun = make(map[string]map[string]struct{})
+		as.metrics = opts.MetricsRegistry
+		if as.metrics == nil {
+			as.metrics = NewMetricsRegistry()
+		}
 	}
 	return as
 }
@@ -185,7 +189,7 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 	metric.RunID = event.runID
 	metric.Zone = em.Zone
 
-	metric.ToPrometheus()
+	as.metrics.RecordEvent(metric)
 }
 
 func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
@@ -224,38 +228,6 @@ func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
 			}
 		}
 	}
-}
-
-func (as *AgentServer) reportOwnMetrics(interval time.Duration) error {
-	var sampler resources.Sampler
-	var sampledRunID string
-	for {
-		time.Sleep(interval)
-		runID := as.getActiveRunID()
-		if runID == "" {
-			continue
-		}
-		if runID != sampledRunID {
-			sampler.Reset()
-			sampledRunID = runID
-		}
-		sample, ok, err := sampler.Sample()
-		if err != nil {
-			return err
-		}
-		as.publishResourceMetrics(runID, sample, ok)
-	}
-}
-
-func (as *AgentServer) publishResourceMetrics(runID string, sample resources.Sample, ok bool) {
-	meta := as.options.EngineMeta
-	if !ok {
-		cpuGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
-		memGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
-		return
-	}
-	cpuGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(sample.CPUCores)
-	memGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(float64(sample.MemoryBytes))
 }
 
 func (as *AgentServer) SubscribeToCoordinator() (chan protocol.Message, error) {
@@ -374,6 +346,17 @@ type AgentServerOptions struct {
 	Stop                func(context.Context, RunContext, Process) error
 	// StopTimeout overrides DefaultStopTimeout when positive.
 	StopTimeout time.Duration
+	// MetricsRegistry supplies the SDK's canonical collectors. If nil, the SDK
+	// creates a per-server registry. It cannot be combined with native sources.
+	// Do not share one registry between servers.
+	MetricsRegistry *MetricsRegistry
+	// WrapMetricsHandler wraps the SDK registry handler behind authentication.
+	// Use it to drain engine output with the incoming context and synchronize
+	// collection, gathering, and run reset. Call the supplied handler only after
+	// collection succeeds, while retaining any adapter lock needed by Reset.
+	// It cannot be combined with MetricParser or native metrics options.
+	// ResultFile may name ordinary workload output; the SDK does not tail it.
+	WrapMetricsHandler func(http.Handler) http.Handler
 	// MetricsURL proxies an external normalized endpoint; it cannot be combined
 	// with MetricsHandler or MetricParser.
 	MetricsURL string
@@ -504,6 +487,14 @@ func (as *AgentServer) validateMetricsOptions() error {
 	if options.LabelsUsageLimit < 0 {
 		return fmt.Errorf("metrics label limit must be nonnegative")
 	}
+	if options.MetricsURL != "" || options.MetricsHandler != nil {
+		if options.MetricsRegistry != nil || options.WrapMetricsHandler != nil {
+			return fmt.Errorf("native metrics cannot configure MetricsRegistry or WrapMetricsHandler")
+		}
+	}
+	if options.WrapMetricsHandler != nil && options.MetricParser != nil {
+		return fmt.Errorf("WrapMetricsHandler cannot configure MetricParser")
+	}
 	if options.MetricsHandler != nil && options.MetricsURL != "" {
 		return fmt.Errorf("native metrics cannot configure both MetricsHandler and MetricsURL")
 	}
@@ -514,7 +505,7 @@ func (as *AgentServer) validateMetricsOptions() error {
 		if options.NativeMetricsSchema != "" {
 			return fmt.Errorf("native metrics schema requires MetricsURL or MetricsHandler")
 		}
-		if (options.ResultFile != "") != (options.MetricParser != nil) {
+		if options.WrapMetricsHandler == nil && (options.ResultFile != "") != (options.MetricParser != nil) {
 			return fmt.Errorf("result-file metrics require both ResultFile and MetricParser")
 		}
 		return nil

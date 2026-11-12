@@ -16,14 +16,6 @@ func TestMetricsIngestion(t *testing.T) {
 	const runID = "event-ingestion-run"
 	meta := EngineMeta{CollectionID: t.Name(), PlanID: "plan", EngineID: "engine", Zone: "zone"}
 	identity := prometheus.Labels{"collection_id": meta.CollectionID, "plan_id": meta.PlanID, "run_id": runID, "engine_no": meta.EngineID, "zone": meta.Zone}
-	cleanup := func() {
-		labelLatencyHistogram.DeletePartialMatch(identity)
-		statusCounter.DeletePartialMatch(identity)
-		egressCounter.DeletePartialMatch(identity)
-		threadsGauge.DeletePartialMatch(identity)
-	}
-	cleanup()
-	t.Cleanup(cleanup)
 	as := NewAgentServer(AgentServerOptions{
 		EngineMeta: meta, ResultFile: "results.jsonl", LabelsUsageLimit: 10,
 		MetricParser: func(line string) (ShibuyaMetric, error) {
@@ -39,7 +31,7 @@ func TestMetricsIngestion(t *testing.T) {
 	as.makePromMetrics(metricEvent{runID: runID, line: `{"Label":"test-label","Status":"200","Latency":250,"EgressBytes":1024,"Threads":10}`})
 	gather := func() map[string]*dto.Metric {
 		t.Helper()
-		families, err := metricsRegistry().Gather()
+		families, err := as.MetricsRegistry().Gather()
 		require.NoError(t, err)
 		metrics := make(map[string]*dto.Metric)
 		for _, family := range families {
@@ -47,9 +39,6 @@ func TestMetricsIngestion(t *testing.T) {
 				labels := make(map[string]string)
 				for _, label := range metric.Label {
 					labels[label.GetName()] = label.GetValue()
-				}
-				if labels["collection_id"] != meta.CollectionID {
-					continue
 				}
 				for key, value := range identity {
 					assert.Equal(t, value, labels[key])
@@ -74,18 +63,13 @@ func TestMetricsIngestion(t *testing.T) {
 	assert.Equal(t, float64(10), before["shibuya_threads_gauge"].GetGauge().GetValue())
 	as.makePromMetrics(metricEvent{runID: runID, line: "malformed|row"})
 	assert.Equal(t, before, gather(), "malformed events must not change any totals")
+	as.makePromMetrics(metricEvent{runID: runID, line: `{"Label":"` + strings.Repeat("x", 1024) + `","Status":"503","Latency":999,"EgressBytes":999,"Threads":999}`})
+	assert.Equal(t, before, gather(), "an invalid label must reject the entire event")
 }
 
 func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 	const runID = "label-limits-run"
 	meta := EngineMeta{CollectionID: t.Name(), PlanID: "plan", EngineID: "engine", Zone: "zone"}
-	identity := prometheus.Labels{"collection_id": meta.CollectionID}
-	t.Cleanup(func() {
-		labelLatencyHistogram.DeletePartialMatch(identity)
-		statusCounter.DeletePartialMatch(identity)
-		egressCounter.DeletePartialMatch(identity)
-		threadsGauge.DeletePartialMatch(identity)
-	})
 	as := NewAgentServer(AgentServerOptions{
 		EngineMeta: meta, ResultFile: "results.jsonl", LabelsUsageLimit: 1,
 		MetricParser: func(line string) (ShibuyaMetric, error) {
@@ -112,7 +96,7 @@ func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 	as.labelsLock.Unlock()
 	emit(runID, "first")
 
-	families, err := metricsRegistry().Gather()
+	families, err := as.MetricsRegistry().Gather()
 	require.NoError(t, err)
 	counts := make(map[string]float64)
 	for _, family := range families {
@@ -154,13 +138,6 @@ func TestMetricsIngestionNumericLabelBudget(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			meta := EngineMeta{CollectionID: t.Name(), PlanID: "plan", EngineID: "engine", Zone: "zone"}
-			identity := prometheus.Labels{"collection_id": meta.CollectionID}
-			t.Cleanup(func() {
-				labelLatencyHistogram.DeletePartialMatch(identity)
-				statusCounter.DeletePartialMatch(identity)
-				egressCounter.DeletePartialMatch(identity)
-				threadsGauge.DeletePartialMatch(identity)
-			})
 			as := NewAgentServer(AgentServerOptions{
 				EngineMeta: meta, ResultFile: "results", LabelsUsageLimit: test.limit,
 				MetricParser: func(label string) (ShibuyaMetric, error) {
@@ -168,10 +145,14 @@ func TestMetricsIngestionNumericLabelBudget(t *testing.T) {
 				},
 			})
 			as.startMetricsRun("run")
+			as.makePromMetrics(metricEvent{runID: "run", line: strings.Repeat("x", 1024)})
+			empty, err := as.MetricsRegistry().Gather()
+			require.NoError(t, err)
+			assert.Empty(t, empty, "invalid labels must neither publish metrics nor consume admission")
 			for _, label := range []string{"a", "b", "c", "a", "others"} {
 				as.makePromMetrics(metricEvent{runID: "run", line: label})
 			}
-			families, err := metricsRegistry().Gather()
+			families, err := as.MetricsRegistry().Gather()
 			require.NoError(t, err)
 			counts := make(map[string]float64)
 			for _, family := range families {
@@ -187,4 +168,57 @@ func TestMetricsIngestionNumericLabelBudget(t *testing.T) {
 			assert.Equal(t, test.want, counts)
 		})
 	}
+}
+
+func TestMetricsIngestionIsolatesServersWithIdenticalIdentity(t *testing.T) {
+	options := AgentServerOptions{
+		EngineMeta:       EngineMeta{CollectionID: "collection", PlanID: "plan", EngineID: "engine", Zone: "zone"},
+		ResultFile:       "results",
+		LabelsUsageLimit: 1,
+		MetricParser: func(string) (ShibuyaMetric, error) {
+			return ShibuyaMetric{Label: "checkout", Status: "200", Latency: 250, EgressBytes: 1024, Threads: 7}, nil
+		},
+	}
+	first := NewAgentServer(options)
+	second := NewAgentServer(options)
+	first.startMetricsRun("same-run")
+	second.startMetricsRun("same-run")
+	event := metricEvent{runID: "same-run", line: "event"}
+	first.makePromMetrics(event)
+	empty, err := second.MetricsRegistry().Gather()
+	require.NoError(t, err)
+	assert.Empty(t, empty, "matching identities must not share collectors")
+	first.makePromMetrics(event)
+	second.makePromMetrics(event)
+	for _, test := range []struct {
+		server *AgentServer
+		count  float64
+	}{
+		{first, 2},
+		{second, 1},
+	} {
+		families, err := test.server.MetricsRegistry().Gather()
+		require.NoError(t, err)
+		require.Len(t, families, 4)
+		for _, family := range families {
+			require.Len(t, family.Metric, 1)
+			metric := family.Metric[0]
+			assert.Equal(t, "same-run", nativeLabelValue(metric, "run_id"))
+			switch family.GetName() {
+			case "shibuya_status_counter":
+				assert.Equal(t, test.count, metric.GetCounter().GetValue())
+			case "shibuya_egress_bytes_counter":
+				assert.Equal(t, test.count*1024, metric.GetCounter().GetValue())
+			case "shibuya_latency_label_milliseconds":
+				assert.Equal(t, uint64(test.count), metric.GetHistogram().GetSampleCount())
+				assert.Equal(t, test.count*250, metric.GetHistogram().GetSampleSum())
+			case "shibuya_threads_gauge":
+				assert.Equal(t, float64(7), metric.GetGauge().GetValue())
+			}
+		}
+	}
+	first.MetricsRegistry().Reset()
+	retained, err := second.MetricsRegistry().Gather()
+	require.NoError(t, err)
+	assert.Len(t, retained, 4, "resetting one server must not remove another server's series")
 }

@@ -14,14 +14,16 @@ collectors and event recording remain in `agent`.
 | Mode | `AgentServerOptions` | Ownership |
 | --- | --- | --- |
 | Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsHandler` nil, `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
+| Direct SDK registry updates | Optional `MetricsRegistry: agent.NewMetricsRegistry()` and `WrapMetricsHandler`; leave `MetricParser`, `MetricsHandler`, and all native options unset | The adapter validates and admits engine samples, then updates SDK-defined collectors. The SDK serves the registry and samples resources. |
 | In-process normalized handler | Non-nil `MetricsHandler`, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser`, empty `MetricsURL` | The adapter owns normalization, label limits, and exporter state; the SDK serves the handler directly behind its existing authentication. Folding options are not supported. |
 | Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` and `MetricsHandler` | The engine enforces its configured label limit and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
 | Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
 
-With `MetricsHandler` or `MetricsURL`, `ResultFile` may name ordinary workload
-output, such as k6 CSV. The SDK does not tail it for metrics or require a parser.
-Without either native source, `ResultFile` and `MetricParser` must be paired.
-`MetricsHandler`, `MetricsURL`, and `MetricParser` are mutually exclusive.
+With `WrapMetricsHandler`, `MetricsHandler`, or `MetricsURL`, `ResultFile` may
+name ordinary workload output, such as k6 CSV. The SDK does not tail it or require
+a parser. Otherwise, `ResultFile` and `MetricParser` must be paired.
+`WrapMetricsHandler`, `MetricsHandler`, `MetricsURL`, and `MetricParser` are
+mutually exclusive. An explicit `MetricsRegistry` cannot accompany a native source.
 `FoldNativeMetrics: true` and any nonempty `NativeMetricsOverflowLabel` require
 `MetricsURL`; they are rejected with a handler, result-file events, or registry only.
 For URL-backed metrics, a valid overflow label may be configured with folding
@@ -41,6 +43,8 @@ identify the remedy:
 - `unsupported native metrics schema %q; require shibuya-v1 from an adapter-normalized endpoint`
 - `native metrics overflow label must be others or _other_`
 - `native metrics URL must use http or https and include a host`
+- `native metrics cannot configure MetricsRegistry or WrapMetricsHandler`
+- `WrapMetricsHandler cannot configure MetricParser`
 
 Choose an integration based on both how the engine exposes metrics and the schema
 it produces. For example, an engine without native Prometheus export, such as
@@ -63,6 +67,53 @@ upstream response without buffering the snapshot, parsing, folding, re-encoding,
 or imposing text/identity negotiation. The engine owns budget enforcement and
 profile conformance. Metrics-gateway admission by metric name does not establish
 semantic conformance.
+
+### SDK-owned registry
+
+`agent.NewMetricsRegistry()` creates the canonical collectors for one agent;
+pass it as `AgentServerOptions.MetricsRegistry` when initializing an adapter
+that needs to record independent samples. Otherwise, `NewAgentServer` creates
+its own instance. `AgentServer.MetricsRegistry()` returns that instance, or nil
+in native handler/URL modes. No collectors use process-global state. Do not share
+a registry between servers or register duplicate families.
+
+Recording methods take `ShibuyaMetric` values with identity from `RunContext`:
+
+- `ObserveRequest` records ordinary latency and one status count only.
+- `AddReceivedBytes` adds only `EgressBytes`, under the supplied label.
+- `SetConcurrency` sets only `Threads`.
+- `RecordEvent` records all four values for a complete per-request event. It
+  preserves the parser's case-insensitive `llm_resp` histogram routing;
+  `ObserveRequest` always records ordinary request latency.
+
+The adapter owns source validation and request-name admission before calling
+these methods. Use `LabelIsValid` and `metricschema.AdmitRequestName` with the
+resolved label budget. Independent bytes or concurrency samples must not be
+passed to `RecordEvent`; doing so invents requests. Preserve aggregate byte
+attribution when the source does not identify a request.
+
+`WrapMetricsHandler func(http.Handler) http.Handler` wraps the SDK's handler
+behind bearer authentication. Drain pending engine output using the incoming
+request context, fail the response before calling the supplied handler if
+collection fails or is not ready, and hold the adapter's collection/reset lock
+through the supplied handler's `ServeHTTP`. The SDK then samples resources and
+gathers its registry. Do not write another exposition, start another listener,
+or implement resource collection in the wrapper. Concurrent recording is safe,
+but gathering is not a transaction across independent updates; adapters needing
+a coherent CSV snapshot must retain their lock through the scrape.
+
+Retain completed-run values and drain final output on post-exit scrapes. When an
+adapter clears its run-local parser/admission state in `BeforeStart`, call
+`registry.Reset()` under the same adapter lock. Reset clears all series and
+resource identity/baseline; the SDK assigns resource identity on successful
+launch. Without explicit Reset, prior-run series remain separately labelled.
+Never reset during an active run. `Gather` reads current values without sampling;
+resource collection belongs to the SDK HTTP route.
+
+This replaces the process-global `ShibuyaMetric.ToPrometheus()` API with
+`registry.RecordEvent(metric)`. JMeter/Locust-style `MetricParser` callbacks
+and the `ShibuyaMetric` data fields remain unchanged. Replay-style native
+proxying remains separate; a registry cannot be shared with another process.
 
 ### In-process exporter ownership
 
@@ -124,10 +175,10 @@ Every series carries identity labels
 
 Result parsers supply request values. The runtime overwrites `ShibuyaMetric`'s
 collection, plan, run, engine, and zone with the assigned run's identity before
-recording the event. Native adapters must supply these labels themselves, using
-resolved `EngineMeta` and callback `RunContext.RunID` for an in-process exporter,
-or the runtime's same-named workload environment variables for an external
-producer. Parser identity injection and native exposition are not interchangeable.
+recording the event. Direct registry callers populate these fields from their
+callback `RunContext`; they do not infer assignments. Native adapters supply the
+same identity labels using resolved `EngineMeta` and `RunContext.RunID`, or the
+runtime's same-named workload environment variables for an external producer.
 
 | Historical family name | Type | Unit and meaning | Labels |
 | --- | --- | --- | --- |
@@ -177,6 +228,9 @@ Rejection scope depends on the integration:
   whole-sample rejection rule before updating request metrics. Independently
   reported samples, such as aggregate received bytes or live concurrency, remain
   independent; do not discard them because another request sample was rejected.
+- **Direct SDK registry updates:** the adapter validates and admits each source
+  sample before recording it. The recording methods do not apply a second
+  admission policy; independent byte and concurrency samples remain independent.
 
 These are metrics-reporting rules, not limits on workload HTTP URLs or permission
 to execute requests. Rejecting a metric event does not cancel or fail the workload.
@@ -204,10 +258,10 @@ or its default back into that environment.
 Result-file ingestion and opt-in SDK folding permit **at most N request names
 plus one overflow name per agent/run**. In those SDK-managed modes, zero
 permits only overflow. Negative budgets are invalid in every mode.
-Native engines and in-process exporters enforce their own configured limits;
-default proxying and `MetricsHandler` do not enforce them. Explicit
-`FoldNativeMetrics: true` enables SDK enforcement only for URL-backed native
-engines as a last-resort fallback.
+Native engines, in-process exporters, and direct registry callers enforce their
+configured limits; recording methods, default proxying, and `MetricsHandler` do
+not enforce them. Explicit `FoldNativeMetrics: true` enables SDK enforcement only
+for URL-backed native engines as a last-resort fallback.
 
 Adapters can share the SDK's admission policy with
 `metricschema.AdmitRequestName(requestName, admitted, limit, overflowName)`.
@@ -349,11 +403,13 @@ omitted. Existing error charts classify non-2xx/non-3xx statuses as errors.
 
 ## Runtime resource metrics
 
-In addition to the engine's request metrics, `github.com/reqfleet/engine-sdk/agent` automatically collects
-runtime CPU and memory usage. In result-file and registry-only modes, it exposes
-these as `shibuya_cpu_gauge` (CPU cores) and `shibuya_mem_gauge` (bytes).
-Native endpoints and in-process handlers provide these resource metrics in
-their own Prometheus exposition; the SDK does not merge its registry.
+The SDK collects container CPU and memory on each SDK-registry HTTP scrape,
+including result-file, direct-update, and registry-only modes. It exposes
+`shibuya_cpu_gauge` (CPU cores) and `shibuya_mem_gauge` (bytes). Sampling begins
+after successful launch and retains that run's identity for final scrapes,
+including runs that complete before their first scrape. There is no background
+resource reporter. Native `MetricsURL` and `MetricsHandler` modes perform no SDK
+resource reads; their producers supply the complete exposition without a merge.
 
 The runtime and adapter-owned exporters share a synchronous resource sampler
 from `github.com/reqfleet/engine-sdk/resources`. Sampling policy is separate from
@@ -396,22 +452,24 @@ these rules:
   baseline, not the failed attempt.
 - When `ok` is true and the error is nil, both `CPUCores` and `MemoryBytes` are
   reportable, including genuine zero usage.
-- Call `Reset()` at each run boundary; it discards the CPU baseline. The runtime
-  does this before sampling a different active run.
+- Call `Reset()` at each run boundary; it discards the CPU baseline. The SDK
+  resets automatically on successful launch; adapters using its registry do not
+  manage the sampler.
 
 An unavailable sample (`ok=false`, no error) is not a zero-usage measurement.
 Omit both resource series, including previous values after a counter decrease;
 do not present stale values as a new sample. Always check the error before updating
-any gauges. The runtime retains its existing fatal resource-error policy; k6
-fails the scrape rather than publishing measurements from a failed attempt.
+any gauges. An SDK resource read error fails the entire scrape with HTTP 500,
+without publishing partial measurements, serving stale exposition, or terminating
+the agent. The next scrape can recover using the last successful baseline.
 
 `Sample` and `Reset` are synchronized; do not copy a sampler after first use.
-The sampler starts no workers and owns no Prometheus collectors. Exporters own
-scrape scheduling, shutdown, and serialization of run identity, reset and
-publication. Publish both values from an available sample as `metricschema.CPUGauge`
-and `metricschema.MemoryGauge`, with `metricschema.ResourceLabels` from resolved
-`EngineMeta` and the current `RunContext.RunID`. Sampling does not automatically
-add resource families to a `MetricsHandler` or `MetricsURL` response.
+The sampler starts no workers and owns no Prometheus collectors. The SDK owns
+sampling and serialization of resource identity, reset, publication, and gathering
+for its registry. Standalone native exporters own those responsibilities when
+using the sampler directly; publish available values with the canonical names
+and resource labels. SDK collection never adds resource families to a
+`MetricsHandler` or `MetricsURL` response.
 
 ## Explicit adapter mapping examples
 

@@ -71,12 +71,27 @@
 //
 // # Metrics integration
 //
-// Adapters either map result-file events with MetricParser, explicitly declare
-// MetricsSchemaShibuyaV1 for an adapter-normalized MetricsHandler or MetricsURL,
-// or expose the registry without request ingestion. These sources are mutually
-// exclusive; a Prometheus handler or URL alone is not a schema mapping.
+// Adapters map result-file events with MetricParser, update a MetricsRegistry
+// directly (optionally using WrapMetricsHandler to collect before scrapes), or
+// declare MetricsSchemaShibuyaV1 for a normalized MetricsHandler or MetricsURL.
+// Parser, wrapper, and native sources are mutually exclusive. Registry-only
+// serving without ingestion does not provide complete request reporting.
 // See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
+//
+// MetricsRegistry owns per-agent collectors. ObserveRequest, AddReceivedBytes,
+// and SetConcurrency update independent samples; RecordEvent handles complete
+// events. Direct callers supply identity from RunContext and validate/admit names
+// before recording. There are no global collectors. Reset clears all series;
+// synchronize it with adapter state and scrapes at the next BeforeStart.
+// WrapMetricsHandler receives the SDK handler behind authentication; hold any
+// adapter collection/reset lock through its ServeHTTP after draining with the
+// incoming request context. Retain final output for post-exit scrapes.
+//
+// The SDK samples CPU/memory on its registry HTTP scrapes, retaining the last
+// successful launch's identity and resetting its baseline on the next launch.
+// Resource failures return HTTP 500 rather than partial metrics or fatal exit.
+// MetricsHandler and MetricsURL never start unused SDK resource collection.
 //
 // Adapters ingesting request samples must validate labels with
 // ShibuyaMetric.LabelIsValid before admission and discard invalid samples without

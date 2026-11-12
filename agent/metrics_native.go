@@ -26,6 +26,7 @@ func (as *AgentServer) startMetricsRun(runID string) {
 		return
 	}
 	if as.options.MetricsURL == "" {
+		as.metrics.startResourceRun(as.options.EngineMeta, runID)
 		as.labelsLock.Lock()
 		as.labelsByRun[runID] = make(map[string]struct{})
 		as.labelsLock.Unlock()

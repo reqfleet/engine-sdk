@@ -184,15 +184,6 @@ func (as *AgentServer) stopRun(runID string, reason protocol.StopReason) {
 	}
 }
 
-func (as *AgentServer) getActiveRunID() string {
-	as.stateLock.RLock()
-	defer as.stateLock.RUnlock()
-	if as.runtime.run == nil || as.runtime.run.process == nil {
-		return ""
-	}
-	return as.runtime.run.context.RunID
-}
-
 func (as *AgentServer) getProgressStatus() *protocol.RunStatus {
 	return as.getRunProgressStatus("")
 }

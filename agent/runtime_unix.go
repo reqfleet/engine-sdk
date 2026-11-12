@@ -26,11 +26,6 @@ func (as *AgentServer) Run() error {
 	if options.EngineMeta.CoordinatorIP == "" {
 		return fmt.Errorf("coordinator endpoint is not configured")
 	}
-	go func() {
-		if err := as.reportOwnMetrics(5 * time.Second); err != nil {
-			options.Logger.Fatal(err)
-		}
-	}()
 	go as.runRequestWorker(context.Background())
 	go func() {
 		for {

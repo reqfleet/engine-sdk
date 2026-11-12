@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,13 @@ import (
 
 func TestMetricsOptionsAdmission(t *testing.T) {
 	parser := func(string) (ShibuyaMetric, error) { return ShibuyaMetric{}, nil }
+	wrapperCalls := 0
+	wrapper := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			wrapperCalls++
+			next.ServeHTTP(w, r)
+		})
+	}
 	handlerCalls := 0
 	exporter := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		handlerCalls++
@@ -36,6 +44,21 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 		resultMetrics bool
 	}{
 		{name: "registry"},
+		{name: "supplied registry", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry()}},
+		{name: "supplied parser registry", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), ResultFile: "results", MetricParser: parser}, resultMetrics: true},
+		{name: "registry wrapper", options: AgentServerOptions{WrapMetricsHandler: wrapper}},
+		{name: "supplied registry wrapper", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), WrapMetricsHandler: wrapper}},
+		{name: "wrapper workload output", options: AgentServerOptions{WrapMetricsHandler: wrapper, ResultFile: "results.csv"}},
+		{name: "negative wrapper label limit", options: AgentServerOptions{WrapMetricsHandler: wrapper, LabelsUsageLimit: -1}, invalid: true},
+		{name: "registry handler conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "registry URL conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "registry schema conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "wrapper parser conflict", options: AgentServerOptions{WrapMetricsHandler: wrapper, ResultFile: "results", MetricParser: parser}, invalid: true},
+		{name: "wrapper handler conflict", options: AgentServerOptions{WrapMetricsHandler: wrapper, MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "wrapper URL conflict", options: AgentServerOptions{WrapMetricsHandler: wrapper, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "wrapper schema conflict", options: AgentServerOptions{WrapMetricsHandler: wrapper, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "wrapper folding conflict", options: AgentServerOptions{WrapMetricsHandler: wrapper, FoldNativeMetrics: true}, invalid: true},
+		{name: "wrapper overflow conflict", options: AgentServerOptions{WrapMetricsHandler: wrapper, NativeMetricsOverflowLabel: "others"}, invalid: true},
 		{name: "result events", options: AgentServerOptions{ResultFile: "results", MetricParser: parser}, resultMetrics: true},
 		{name: "negative result label limit", options: AgentServerOptions{ResultFile: "results", MetricParser: parser, LabelsUsageLimit: -1}, invalid: true},
 		{name: "negative native label limit", options: AgentServerOptions{MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: -1}, invalid: true},
@@ -86,6 +109,7 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 			as.metricsHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 			assert.Equal(t, http.StatusServiceUnavailable, response.Code)
 			assert.Zero(t, handlerCalls, "invalid options must not invoke the exporter")
+			assert.Zero(t, wrapperCalls, "invalid options must not invoke registry middleware")
 		})
 	}
 
@@ -97,24 +121,23 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 }
 
 func TestMetricsHandlerUsesRegistry(t *testing.T) {
-	cpuGauge.WithLabelValues("collection", "plan", "run", "zone", "engine").Set(7)
-	t.Cleanup(func() { cpuGauge.DeleteLabelValues("collection", "plan", "run", "zone", "engine") })
-	as := NewAgentServer(AgentServerOptions{})
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	recorder := httptest.NewRecorder()
+	registry := NewMetricsRegistry()
+	as := NewAgentServer(AgentServerOptions{MetricsRegistry: registry})
+	registry.RecordEvent(ShibuyaMetric{
+		CollectionID: "collection", PlanID: "plan", RunID: "run", EngineID: "engine", Zone: "zone",
+		Label: "checkout", Status: "200", Latency: 250, EgressBytes: 1024, Threads: 7,
+	})
+	families := nativeScrape(t, as.metricsHandler())
+	require.Len(t, families, 4)
+	assert.Equal(t, map[string]float64{"checkout/200": 1}, nativeCounters(families["shibuya_status_counter"]))
+	assert.Equal(t, float64(1024), families["shibuya_egress_bytes_counter"].Metric[0].GetCounter().GetValue())
+	assert.Equal(t, float64(7), families["shibuya_threads_gauge"].Metric[0].GetGauge().GetValue())
+	histogram := families["shibuya_latency_label_milliseconds"].Metric[0].GetHistogram()
+	assert.Equal(t, uint64(1), histogram.GetSampleCount())
+	assert.Equal(t, float64(250), histogram.GetSampleSum())
 
-	as.metricsHandler().ServeHTTP(recorder, req)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-	}
-	body, err := io.ReadAll(recorder.Result().Body)
-	if err != nil {
-		t.Fatalf("ReadAll() error = %v", err)
-	}
-	if !strings.Contains(string(body), "shibuya_cpu_gauge") {
-		t.Fatalf("metrics body did not include shibuya_cpu_gauge: %s", string(body))
-	}
+	other := NewAgentServer(AgentServerOptions{})
+	assert.Empty(t, nativeScrape(t, other.metricsHandler()), "a second server must not expose the supplied registry")
 }
 
 func TestPreparationProgressRequiresAuthentication(t *testing.T) {
@@ -326,4 +349,194 @@ func TestInProcessMetricsWithWorkloadOutput(t *testing.T) {
 	f.server.Handler().ServeHTTP(response, request)
 	assert.Equal(t, http.StatusOK, response.Code)
 	assert.Equal(t, "adapter_ready 1\n", response.Body.String())
+}
+
+func TestMetricsWrapperAuthentication(t *testing.T) {
+	calls := 0
+	registry := NewMetricsRegistry()
+	as := NewAgentServer(AgentServerOptions{
+		EngineMeta:      EngineMeta{APIKey: "secret"},
+		MetricsRegistry: registry,
+		WrapMetricsHandler: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				registry.ObserveRequest(ShibuyaMetric{Label: "drained", Status: "200", Latency: 1})
+				next.ServeHTTP(w, r)
+			})
+		},
+	})
+	handler := as.Handler()
+	for _, test := range []struct {
+		name, token string
+		status      int
+	}{
+		{"missing", "", http.StatusBadRequest},
+		{"wrong case", "bearer secret", http.StatusBadRequest},
+		{"missing separator", "Bearer", http.StatusBadRequest},
+		{"extra separator", "Bearer  secret", http.StatusBadRequest},
+		{"wrong token", "Bearer wrong", http.StatusForbidden},
+		{"empty token", "Bearer ", http.StatusForbidden},
+		{"correct", "Bearer secret", http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			request.Header.Set("Authorization", test.token)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			assert.Equal(t, test.status, response.Code)
+			if test.status != http.StatusOK {
+				assert.Zero(t, calls, "authentication must precede draining")
+				families, err := registry.Gather()
+				require.NoError(t, err)
+				assert.Empty(t, families)
+				return
+			}
+			assert.Equal(t, 1, calls)
+			assert.Contains(t, response.Body.String(), `label="drained"`)
+			assert.Contains(t, response.Body.String(), "shibuya_status_counter")
+		})
+	}
+}
+
+func TestMetricsWrapperUsesIncomingContext(t *testing.T) {
+	type contextKey struct{}
+	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), contextKey{}, "scrape"), 5*time.Second)
+	defer cancel()
+	entered := make(chan context.Context, 1)
+	done := make(chan struct{})
+	as := NewAgentServer(AgentServerOptions{
+		EngineMeta: EngineMeta{APIKey: "secret"},
+		WrapMetricsHandler: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				entered <- r.Context()
+				<-r.Context().Done()
+				http.Error(w, "drain canceled", http.StatusRequestTimeout)
+			})
+		},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler := as.Handler()
+	go func() {
+		defer close(done)
+		handler.ServeHTTP(response, request)
+	}()
+	select {
+	case actual := <-entered:
+		assert.Same(t, ctx, actual)
+		assert.Equal(t, "scrape", actual.Value(contextKey{}))
+		deadline, ok := actual.Deadline()
+		require.True(t, ok)
+		want, _ := ctx.Deadline()
+		assert.Equal(t, want, deadline)
+	case <-ctx.Done():
+		t.Fatal("wrapper did not receive the scrape")
+	}
+	cancel()
+	select {
+	case <-done:
+		assert.Equal(t, http.StatusRequestTimeout, response.Code)
+		assert.Equal(t, "drain canceled\n", response.Body.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("wrapper did not stop on request cancellation")
+	}
+}
+
+func TestMetricsWrapperErrorPrecedesSamplingAndGather(t *testing.T) {
+	registry := NewMetricsRegistry()
+	sampler := &fakeResourceSampler{results: []resourceSampleResult{{}}}
+	registry.resources.sampler = sampler
+	registry.RecordEvent(ShibuyaMetric{RunID: "run", Label: "previous", Status: "200", Latency: 1})
+	fail := true
+	as := NewAgentServer(AgentServerOptions{
+		EngineMeta:      EngineMeta{APIKey: "secret"},
+		MetricsRegistry: registry,
+		WrapMetricsHandler: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if fail {
+					w.Header().Set("Retry-After", "2")
+					http.Error(w, "CSV drain failed", http.StatusBadGateway)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		},
+	})
+	as.startMetricsRun("run")
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	handler := as.Handler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusBadGateway, response.Code)
+	assert.Equal(t, "2", response.Header().Get("Retry-After"))
+	assert.Equal(t, "CSV drain failed\n", response.Body.String(), "no stale registry fallback or appended exposition")
+	assert.Zero(t, sampler.calls, "draining must succeed before SDK sampling or gathering")
+	fail = false
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), `label="previous"`)
+	assert.Equal(t, 1, sampler.calls)
+}
+
+type metricsLockCheckingWriter struct {
+	*httptest.ResponseRecorder
+	mu       *sync.Mutex
+	unlocked bool
+}
+
+func (w *metricsLockCheckingWriter) Write(body []byte) (int, error) {
+	if w.mu.TryLock() {
+		w.unlocked = true
+		w.mu.Unlock()
+	}
+	return w.ResponseRecorder.Write(body)
+}
+
+func TestMetricsWrapperDrainsFinalScrapeUnderAdapterLock(t *testing.T) {
+	registry := NewMetricsRegistry()
+	registry.resources.sampler = &fakeResourceSampler{results: []resourceSampleResult{{}}}
+	var adapterMu sync.Mutex
+	pending := []ShibuyaMetric{{
+		RunID: "run-1", Label: "final-request", Status: "200", Latency: 250, EgressBytes: 1024, Threads: 0,
+	}}
+	fixture := newAgentFixture(t, AgentServerOptions{
+		MetricsRegistry: registry,
+		ResultFile:      "results.csv",
+		WrapMetricsHandler: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				adapterMu.Lock()
+				defer adapterMu.Unlock()
+				for _, metric := range pending {
+					registry.RecordEvent(metric)
+				}
+				pending = nil
+				next.ServeHTTP(w, r)
+			})
+		},
+	}, nil)
+	fixture.send(runMessage(protocol.VerbStart, "run-1", ""))
+	waitRunState(t, fixture, "run-1", protocol.RunRunning)
+	fixture.server.stopRun("run-1", protocol.StopCompleted)
+	waitRunState(t, fixture, "run-1", protocol.RunCompleted)
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := &metricsLockCheckingWriter{ResponseRecorder: httptest.NewRecorder(), mu: &adapterMu}
+	fixture.server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), `label="final-request"`)
+	assert.Contains(t, response.Body.String(), `run_id="run-1"`)
+	assert.Contains(t, response.Body.String(), "shibuya_latency_label_milliseconds_count")
+	assert.False(t, response.unlocked, "the adapter lock must remain held through exposition")
+	require.True(t, adapterMu.TryLock(), "the wrapper must release its lock after the scrape")
+	adapterMu.Unlock()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() == "shibuya_status_counter" {
+			assert.Equal(t, map[string]float64{"final-request/200": 1}, nativeCounters(family))
+		}
+	}
 }
