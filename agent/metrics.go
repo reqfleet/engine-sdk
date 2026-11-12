@@ -107,22 +107,21 @@ func NewMetricsRegistry() *MetricsRegistry {
 func (r *MetricsRegistry) ObserveRequest(metric ShibuyaMetric) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	r.labelLatencyHistogram.WithLabelValues(metric.CollectionID, metric.Label, metric.RunID, metric.EngineID, metric.PlanID, metric.Zone).Observe(metric.Latency)
-	r.statusCounter.WithLabelValues(metric.CollectionID, metric.PlanID, metric.RunID, metric.EngineID, metric.Label, metric.Zone, metric.Status).Inc()
+	r.observeRequest(metric, r.labelLatencyHistogram)
 }
 
 // AddReceivedBytes adds only the received bytes in metric.EgressBytes.
 func (r *MetricsRegistry) AddReceivedBytes(metric ShibuyaMetric) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	r.egressCounter.WithLabelValues(metric.CollectionID, metric.PlanID, metric.RunID, metric.EngineID, metric.Label, metric.Zone).Add(metric.EgressBytes)
+	r.addReceivedBytes(metric)
 }
 
 // SetConcurrency sets only the current concurrency in metric.Threads.
 func (r *MetricsRegistry) SetConcurrency(metric ShibuyaMetric) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	r.threadsGauge.WithLabelValues(metric.CollectionID, metric.PlanID, metric.RunID, metric.EngineID, metric.Zone).Set(metric.Threads)
+	r.setConcurrency(metric)
 }
 
 // RecordEvent records latency, status, received bytes, and concurrency together
@@ -132,14 +131,31 @@ func (r *MetricsRegistry) SetConcurrency(metric ShibuyaMetric) {
 func (r *MetricsRegistry) RecordEvent(metric ShibuyaMetric) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	histogram := r.labelLatencyHistogram
-	if strings.EqualFold(metric.Label, metricschema.LLMResponseLabel) {
-		histogram = r.labelLLMRespLatencyHistogram
+	r.observeRequest(metric, r.latencyHistogramForLabel(metric.Label))
+	r.addReceivedBytes(metric)
+	r.setConcurrency(metric)
+}
+
+// Recording helpers use the caller's lock so RecordEvent can update every
+// collector together with respect to Reset, without nested locking.
+func (r *MetricsRegistry) observeRequest(sm ShibuyaMetric, histogram *prometheus.HistogramVec) {
+	histogram.WithLabelValues(sm.CollectionID, sm.Label, sm.RunID, sm.EngineID, sm.PlanID, sm.Zone).Observe(sm.Latency)
+	r.statusCounter.WithLabelValues(sm.CollectionID, sm.PlanID, sm.RunID, sm.EngineID, sm.Label, sm.Zone, sm.Status).Inc()
+}
+
+func (r *MetricsRegistry) addReceivedBytes(sm ShibuyaMetric) {
+	r.egressCounter.WithLabelValues(sm.CollectionID, sm.PlanID, sm.RunID, sm.EngineID, sm.Label, sm.Zone).Add(sm.EgressBytes)
+}
+
+func (r *MetricsRegistry) setConcurrency(sm ShibuyaMetric) {
+	r.threadsGauge.WithLabelValues(sm.CollectionID, sm.PlanID, sm.RunID, sm.EngineID, sm.Zone).Set(sm.Threads)
+}
+
+func (r *MetricsRegistry) latencyHistogramForLabel(label string) *prometheus.HistogramVec {
+	if strings.EqualFold(label, metricschema.LLMResponseLabel) {
+		return r.labelLLMRespLatencyHistogram
 	}
-	histogram.WithLabelValues(metric.CollectionID, metric.Label, metric.RunID, metric.EngineID, metric.PlanID, metric.Zone).Observe(metric.Latency)
-	r.statusCounter.WithLabelValues(metric.CollectionID, metric.PlanID, metric.RunID, metric.EngineID, metric.Label, metric.Zone, metric.Status).Inc()
-	r.egressCounter.WithLabelValues(metric.CollectionID, metric.PlanID, metric.RunID, metric.EngineID, metric.Label, metric.Zone).Add(metric.EgressBytes)
-	r.threadsGauge.WithLabelValues(metric.CollectionID, metric.PlanID, metric.RunID, metric.EngineID, metric.Zone).Set(metric.Threads)
+	return r.labelLatencyHistogram
 }
 
 // Reset clears every metric series, collection failure, and resource baseline.
