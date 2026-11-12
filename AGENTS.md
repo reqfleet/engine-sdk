@@ -54,7 +54,7 @@ adapter is supplied here.
 | [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, result-event collectors, native request-label admission and snapshot folding |
 | [`protocol`](protocol) | Coordinator messages, explicit run/artifact assignments, lifecycle states, errors, and artifact paths |
 | [`metricschema`](metricschema) | Collector-free metric names, reserved request names, request-name admission, ordered Prometheus labels, and caller-owned histogram boundaries |
-| [`containerstats`](containerstats) | Public cgroup CPU/memory reader API backed by `internal/containerstats`, shared by the runtime and adapter-owned exporters; see the [resource metrics contract](agent/metrics.md#runtime-resource-metrics) |
+| [`containerstats`](containerstats) | Public cgroup readers backed by `internal/containerstats` and a synchronized `Sampler` for CPU rates, memory bytes and run reset, shared by the runtime and adapter-owned exporters; see the [resource metrics contract](agent/metrics.md#runtime-resource-metrics) |
 | [`validation`](validation/doc.go) | Synchronous upload-validation contract, structured diagnostics, and result checks; not part of agent execution |
 | [`examples/jsonvalidator`](examples/jsonvalidator) | Working JSON request-plan validator using only standard-library and public SDK dependencies |
 | [`internal`](internal) | SDK-only artifact transport, subscriptions, and cgroup reader implementation |

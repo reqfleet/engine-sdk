@@ -227,39 +227,38 @@ func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
 }
 
 func (as *AgentServer) reportOwnMetrics(interval time.Duration) error {
-	prev := uint64(0)
-	engineMeta := as.options.EngineMeta
-	engineID := engineMeta.EngineID
-	collectionID := engineMeta.CollectionID
-	planID := engineMeta.PlanID
-	engineNumber := engineID
-	zone := engineMeta.Zone
+	var sampler containerstats.Sampler
+	var sampledRunID string
 	for {
 		time.Sleep(interval)
-		// we don't need to strictly thread safety here
-		// this is for code simplicity
 		runID := as.getActiveRunID()
 		if runID == "" {
 			continue
 		}
-		cpuUsage, err := containerstats.ReadCPUUsage()
+		if runID != sampledRunID {
+			sampler.Reset()
+			sampledRunID = runID
+		}
+		sample, err := sampler.Sample()
+		as.publishResourceMetrics(runID, sample)
 		if err != nil {
 			return err
 		}
-		if prev == 0 {
-			prev = cpuUsage
-			continue
-		}
-		used := float64(cpuUsage-prev) / float64(interval.Microseconds())
-		prev = cpuUsage
-		memoryUsage, err := containerstats.ReadMemoryUsage()
-		if err != nil {
-			return err
-		}
-		cpuGauge.WithLabelValues(collectionID,
-			planID, runID, zone, engineNumber).Set(used)
-		memGauge.WithLabelValues(collectionID,
-			planID, runID, zone, engineNumber).Set(float64(memoryUsage))
+	}
+}
+
+func (as *AgentServer) publishResourceMetrics(runID string, sample containerstats.Sample) {
+	meta := as.options.EngineMeta
+	if sample.CPUValid {
+		cpuGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(sample.CPUCores)
+	} else {
+		// A rebaseline must not leave an earlier rate looking like a current sample.
+		cpuGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
+	}
+	if sample.MemoryValid {
+		memGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(float64(sample.MemoryBytes))
+	} else {
+		memGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
 	}
 }
 

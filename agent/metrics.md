@@ -355,8 +355,9 @@ these as `shibuya_cpu_gauge` (CPU cores) and `shibuya_mem_gauge` (bytes).
 Native endpoints and in-process handlers provide these resource metrics in
 their own Prometheus exposition; the SDK does not merge its registry.
 
-Adapter-owned exporters can reuse the same readers as the runtime by importing
-`github.com/reqfleet/engine-sdk/containerstats`:
+The runtime and adapter-owned exporters share a synchronous resource sampler
+from `github.com/reqfleet/engine-sdk/containerstats`. The underlying readers remain
+available for consumers that need raw counters:
 
 - `containerstats.ReadCPUUsage() (uint64, error)` returns cumulative CPU time in
   **microseconds**, normalized across cgroup v1 and v2. V1's nanosecond counter is
@@ -374,20 +375,39 @@ Calls are synchronous and safe to make concurrently, including alongside the SDK
 runtime. They start no workers, register no collectors, and require no coordinator.
 Missing, unreadable, or malformed files return errors, not successful zero samples.
 
-To produce `metricschema.CPUGauge`, keep the previous successful CPU sample and
-its timestamp in exporter-owned state. Divide the CPU delta by the elapsed
-wall-clock microseconds to obtain average cores consumed; use actual elapsed
-time, not the configured polling interval. The first sample establishes a
-baseline without a rate. Re-establish that baseline at run boundaries or if the
-counter decreases, and require positive elapsed time before calculating a rate.
-Use a monotonic clock, such as timestamps from Go's `time.Now`.
+Use a zero-valued `containerstats.Sampler` and call `Sample()` to obtain a
+`containerstats.Sample` plus an error. The sampler implements these rules:
 
-Publish memory readings directly as `metricschema.MemoryGauge`. Supply the
-identity labels defined by `metricschema.ResourceLabels`, using resolved
-`EngineMeta` and the current `RunContext.RunID`. Synchronize exporter-owned
-sampling state, handle read errors rather than fabricating zeros, and own any
-sampling worker's shutdown. Calling the readers does not automatically add
-resource families to a `MetricsHandler` or `MetricsURL` response.
+- `CPUCores` is the cumulative CPU microsecond delta divided by actual elapsed
+  wall-clock microseconds, retaining sub-microsecond elapsed precision. Timestamps
+  come from Go's monotonic `time.Now`; the configured polling interval is not the
+  denominator. An unchanged successful counter produces a genuine zero rate.
+- `CPUValid` is false on the first successful sample, including a zero counter.
+  A decreasing counter establishes a new baseline and omits CPU for that sample,
+  without unsigned underflow. Nonpositive elapsed time returns an error and does
+  not advance the baseline.
+- Both resources are read on every call. If either read fails, CPU is unavailable
+  and its baseline is unchanged. Errors identify and wrap each failing resource,
+  including both errors when both reads fail. The next successful CPU rate spans
+  from the last successful baseline, not the failed attempt.
+- `MemoryBytes` is independently reportable whenever `MemoryValid` is true,
+  including on the first sample, counter decrease, or a CPU error.
+- Call `Reset()` at each run boundary; it discards the CPU baseline. The runtime
+  does this before sampling a different active run.
+
+False validity flags mean unavailable, not zero. Omit invalid resource series,
+including any previously published CPU rate after a counter decrease; do not
+present stale rates as new measurements. The runtime publishes valid fields and
+retains its existing fatal resource-error policy. Complete-exposition exporters
+may fail a scrape on a sampling error; k6 does so rather than serve partial metrics.
+
+`Sample` and `Reset` are synchronized; do not copy a sampler after first use.
+The sampler starts no workers and owns no Prometheus collectors. Exporters own
+scrape scheduling, shutdown, and serialization of run identity, reset and
+publication. Publish valid `CPUCores` and `MemoryBytes` as `metricschema.CPUGauge`
+and `metricschema.MemoryGauge`, with `metricschema.ResourceLabels` from resolved
+`EngineMeta` and the current `RunContext.RunID`. Sampling does not automatically
+add resource families to a `MetricsHandler` or `MetricsURL` response.
 
 ## Explicit adapter mapping examples
 
