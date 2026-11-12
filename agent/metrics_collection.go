@@ -42,6 +42,12 @@ func (as *AgentServer) reportMetrics(ctx context.Context, run *agentRun) {
 	}
 }
 
+// collectFinalMetrics drains remaining engine output before workspace release.
+// The caller waits for workload exit and joins live collectors/readers first,
+// preventing overlap with live collection. A fresh context allows this final
+// drain even when shutdown has canceled the run context.
+// Collection errors or an expired deadline make registry scrapes fail and are
+// returned to the caller so the run cannot complete successfully with partial totals.
 func (as *AgentServer) collectFinalMetrics(run *agentRun) error {
 	ctx, cancel := context.WithTimeout(context.Background(), FinalMetricsTimeout)
 	defer cancel()
