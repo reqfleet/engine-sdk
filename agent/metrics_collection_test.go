@@ -34,7 +34,7 @@ func TestMetricsCollectionJoinsAndDrainsFinalOutputBeforeRelease(t *testing.T) {
 				"-c", `while [ ! -f "$1" ]; do sleep 0.01; done; printf '12.5' > "$2"`, "sh", marker, run.ResultFile,
 			}}, nil
 		},
-		CollectMetrics: func(ctx context.Context, run RunContext) error {
+		CustomIngestMetrics: func(ctx context.Context, run RunContext) error {
 			if calls.Add(1) == 1 {
 				close(entered)
 				<-ctx.Done()
@@ -120,7 +120,7 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 					}
 					return Command{Command: "true"}, nil
 				},
-				CollectMetrics: func(ctx context.Context, run RunContext) error {
+				CustomIngestMetrics: func(ctx context.Context, run RunContext) error {
 					if run.RunID == "bad" {
 						if _, final := ctx.Deadline(); finalFailure && !final {
 							return nil

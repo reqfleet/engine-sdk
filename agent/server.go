@@ -36,7 +36,7 @@ const (
 	// FinalProgressTimeout bounds the final Progress callback's fresh context.
 	// The callback must honor cancellation.
 	FinalProgressTimeout = 2 * time.Second
-	// FinalMetricsTimeout bounds the final CollectMetrics callback's fresh context.
+	// FinalMetricsTimeout bounds the final CustomIngestMetrics callback's fresh context.
 	// The callback must honor cancellation.
 	FinalMetricsTimeout = 2 * time.Second
 )
@@ -353,14 +353,25 @@ type AgentServerOptions struct {
 	// creates a per-server registry. It cannot be combined with native sources.
 	// Do not share one registry between servers.
 	MetricsRegistry *MetricsRegistry
-	// CollectMetrics updates the SDK registry independently of scrapes. The SDK
-	// calls it after launch and every 250ms until shutdown, then once more with a
-	// fresh FinalMetricsTimeout context after live callbacks and processes finish.
-	// Calls never overlap; honor cancellation and finish cleanup before returning.
-	// An error fails the run and makes registry scrapes fail until Reset or the
-	// next launch. It cannot be combined with MetricParser or native metrics.
-	// ResultFile may name ordinary workload output; the SDK does not tail it.
-	CollectMetrics func(context.Context, RunContext) error
+	// CustomIngestMetrics is for adapters that normalize engine output themselves
+	// and record samples in the SDK-owned MetricsRegistry.
+	//
+	// Use it when MetricParser's complete-request event model does not fit.
+	// For example, k6 CSV emits separate request-duration, received-byte and
+	// concurrency samples. The adapter reads new records, validates and admits
+	// samples, and updates the corresponding SDK metrics.
+	//
+	// The SDK owns scheduling, HTTP exposition and CPU/memory reporting.
+	// This callback must not implement those responsibilities.
+	//
+	// The SDK calls it after launch, every 250ms, and once after workload exit
+	// to drain final output before workspace release. Calls never overlap.
+	// Honor the supplied context; the final call uses FinalMetricsTimeout.
+	// Errors fail the run and registry scrapes until Reset or the next launch.
+	//
+	// Cannot be combined with MetricParser or native metrics sources.
+	// ResultFile may name engine output; the SDK does not tail it.
+	CustomIngestMetrics func(context.Context, RunContext) error
 	// MetricsURL proxies an external normalized endpoint; it cannot be combined
 	// with MetricsHandler or MetricParser.
 	MetricsURL string
@@ -492,12 +503,12 @@ func (as *AgentServer) validateMetricsOptions() error {
 		return fmt.Errorf("metrics label limit must be nonnegative")
 	}
 	if options.MetricsURL != "" || options.MetricsHandler != nil {
-		if options.MetricsRegistry != nil || options.CollectMetrics != nil {
-			return fmt.Errorf("native metrics cannot configure MetricsRegistry or CollectMetrics")
+		if options.MetricsRegistry != nil || options.CustomIngestMetrics != nil {
+			return fmt.Errorf("native metrics cannot configure MetricsRegistry or CustomIngestMetrics")
 		}
 	}
-	if options.CollectMetrics != nil && options.MetricParser != nil {
-		return fmt.Errorf("CollectMetrics cannot configure MetricParser")
+	if options.CustomIngestMetrics != nil && options.MetricParser != nil {
+		return fmt.Errorf("CustomIngestMetrics cannot configure MetricParser")
 	}
 	if options.MetricsHandler != nil && options.MetricsURL != "" {
 		return fmt.Errorf("native metrics cannot configure both MetricsHandler and MetricsURL")
@@ -509,7 +520,7 @@ func (as *AgentServer) validateMetricsOptions() error {
 		if options.NativeMetricsSchema != "" {
 			return fmt.Errorf("native metrics schema requires MetricsURL or MetricsHandler")
 		}
-		if options.CollectMetrics == nil && (options.ResultFile != "") != (options.MetricParser != nil) {
+		if options.CustomIngestMetrics == nil && (options.ResultFile != "") != (options.MetricParser != nil) {
 			return fmt.Errorf("result-file metrics require both ResultFile and MetricParser")
 		}
 		return nil

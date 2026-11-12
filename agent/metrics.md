@@ -14,15 +14,15 @@ collectors and event recording remain in `agent`.
 | Mode | `AgentServerOptions` | Ownership |
 | --- | --- | --- |
 | Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsHandler` nil, `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
-| Direct SDK registry updates | Optional `MetricsRegistry: agent.NewMetricsRegistry()` and `CollectMetrics`; leave `MetricParser`, `MetricsHandler`, and all native options unset | The adapter validates and admits engine samples, then updates SDK-defined collectors. The SDK schedules collection, samples resources, and serves stored values. |
+| Direct SDK registry updates | Optional `MetricsRegistry: agent.NewMetricsRegistry()` and `CustomIngestMetrics`; leave `MetricParser`, `MetricsHandler`, and all native options unset | The adapter validates and admits engine samples, then updates SDK-defined collectors. The SDK schedules ingestion, samples resources, and serves stored values. |
 | In-process normalized handler | Non-nil `MetricsHandler`, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser`, empty `MetricsURL` | The adapter owns normalization, label limits, and exporter state; the SDK serves the handler directly behind its existing authentication. Folding options are not supported. |
 | Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` and `MetricsHandler` | The engine enforces its configured label limit and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
 | Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
 
-With `CollectMetrics`, `MetricsHandler`, or `MetricsURL`, `ResultFile` may
+With `CustomIngestMetrics`, `MetricsHandler`, or `MetricsURL`, `ResultFile` may
 name ordinary workload output, such as k6 CSV. The SDK does not tail it or require
 a parser. Otherwise, `ResultFile` and `MetricParser` must be paired.
-`CollectMetrics`, `MetricsHandler`, `MetricsURL`, and `MetricParser` are
+`CustomIngestMetrics`, `MetricsHandler`, `MetricsURL`, and `MetricParser` are
 mutually exclusive. An explicit `MetricsRegistry` cannot accompany a native source.
 `FoldNativeMetrics: true` and any nonempty `NativeMetricsOverflowLabel` require
 `MetricsURL`; they are rejected with a handler, result-file events, or registry only.
@@ -43,8 +43,8 @@ identify the remedy:
 - `unsupported native metrics schema %q; require shibuya-v1 from an adapter-normalized endpoint`
 - `native metrics overflow label must be others or _other_`
 - `native metrics URL must use http or https and include a host`
-- `native metrics cannot configure MetricsRegistry or CollectMetrics`
-- `CollectMetrics cannot configure MetricParser`
+- `native metrics cannot configure MetricsRegistry or CustomIngestMetrics`
+- `CustomIngestMetrics cannot configure MetricParser`
 
 Choose an integration based on both how the engine exposes metrics and the schema
 it produces. For example, an engine without native Prometheus export, such as
@@ -92,16 +92,22 @@ resolved label budget. Independent bytes or concurrency samples must not be
 passed to `RecordEvent`; doing so invents requests. Preserve aggregate byte
 attribution when the source does not identify a request.
 
-`CollectMetrics func(context.Context, RunContext) error` lets the SDK schedule
-engine-output collection independently of scrapes. It runs after launch and every
-250 milliseconds, on its own loop rather than the readiness/progress loops.
+Use `CustomIngestMetrics func(context.Context, RunContext) error` when the adapter
+must normalize engine output that does not fit `MetricParser`'s complete-request
+event model. For example, k6 CSV emits separate request-duration, received-byte
+and concurrency samples. Read new output, validate and admit samples, then record
+them using the SDK methods. The SDK owns scheduling, HTTP exposition
+and CPU/memory reporting; the callback must not duplicate those responsibilities.
+
+The SDK invokes this callback after launch and every 250 milliseconds,
+independently of scrapes and the readiness/progress loops.
 Honor its context and synchronize adapter state with `Observe`. An uncanceled
 collection error fails the run and initiates shutdown. The registry also rejects
 scrapes with HTTP 500 until reset or the next successful launch, rather than
 serving partial totals as a successful snapshot.
 
 After process/descendant cleanup, the SDK cancels and joins live callbacks and
-readers, then invokes `CollectMetrics` once more with a fresh
+readers, then invokes `CustomIngestMetrics` once more with a fresh
 `FinalMetricsTimeout` context (two seconds). Drain final output within that
 deadline; final errors fail the run. Live and final collection calls never
 overlap, and the workspace is not released until final collection completes.

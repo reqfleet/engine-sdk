@@ -158,8 +158,8 @@ needed. An existing normalized `http.Handler` can be assigned directly to
 
 For adapters that parse engine samples themselves, prefer SDK-owned collectors:
 create `agent.NewMetricsRegistry()`, pass it to the adapter and
-`options.MetricsRegistry`, and set `options.CollectMetrics` to the adapter's
-collection callback. Leave `MetricParser`, `MetricsHandler`, and native options unset.
+`options.MetricsRegistry`, and set `options.CustomIngestMetrics` to the adapter's
+ingestion callback. Leave `MetricParser`, `MetricsHandler`, and native options unset.
 Use independent recording methods rather than defining collectors or reporting
 CPU/memory. Collection runs independently of scrapes, with a final post-exit call
 before workspace reuse. Call `registry.Reset()` with parser/admission reset in
@@ -189,7 +189,7 @@ artifacts yourself.
   the engine-specific installation logic in your container.
 - `ResultFile`: you choose a local output name and configure the engine to write
   to `RunContext.ResultFile`. With `MetricParser`, the SDK ingests its events;
-  with `CollectMetrics`, `MetricsHandler`, or `MetricsURL`, it remains ordinary workload output.
+  with `CustomIngestMetrics`, `MetricsHandler`, or `MetricsURL`, it remains ordinary workload output.
   This is produced by the engine, not an artifact supplied by the control plane.
 
 Use filenames, not paths, for these options; the SDK uses their basenames for
@@ -234,7 +234,7 @@ points below. Their exact signatures are in [`agent/server.go`](agent/server.go)
 | `BeforeStart` | Prepare engine-specific run files after execution artifacts are staged and before command construction. |
 | `BuildCommand` | Return `agent.Command{Command, Args, Dir, Env}` describing the primary workload. Do not start or wait for that process. |
 | `Observe` | Return `protocol.ObservationPending`, `ObservationReady`, or `ObservationWorkComplete`. Use pending for a healthy engine that is not ready; an error fails the run and initiates shutdown. |
-| `CollectMetrics` | Collect engine output into the SDK registry after launch and every 250ms. Honor cancellation; a final call gets a fresh two-second context after live callbacks/processes finish. Errors fail the run and registry scrapes. Do not collect from HTTP requests. |
+| `CustomIngestMetrics` | Normalize engine samples that do not fit `MetricParser`'s complete-request event model, such as k6's independent CSV points, into the SDK registry. Called after launch, every 250ms and once after live callbacks/processes finish with a fresh two-second context. Honor cancellation. Errors fail the run and registry scrapes. The SDK owns scheduling, HTTP and resource sampling. |
 | `Progress` | Return a `protocol.Progress` with a nonempty engine schema `Kind` and valid JSON `Data`. This is optional reporting, not a lifecycle signal. |
 | `Stop` | Request graceful engine shutdown using the runtime-owned `Process.PID` or the engine's control API. Honor the supplied deadline and never reap the primary process. |
 
@@ -302,7 +302,7 @@ one of these modes:
   run identity and accumulates metrics; parser errors drop the event. Never
   feed cumulative snapshots into a per-request event parser.
 - **Direct SDK registry updates:** supply a `MetricsRegistry` and optionally
-  `CollectMetrics`; leave parser and native options unset. Translate validated,
+  `CustomIngestMetrics`; leave parser and native options unset. Translate validated,
   admitted samples into `ObserveRequest`, `AddReceivedBytes`, or `SetConcurrency`.
   `RecordEvent` is only for complete request events. The SDK defines collectors,
   runs a background resource sampler, and serves stored values. The collection

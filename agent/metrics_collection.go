@@ -15,7 +15,7 @@ func (as *AgentServer) reportMetrics(ctx context.Context, run *agentRun) {
 		if ctx.Err() != nil {
 			return
 		}
-		err := as.options.CollectMetrics(ctx, run.context)
+		err := as.options.CustomIngestMetrics(ctx, run.context)
 		if ctx.Err() != nil {
 			return
 		}
@@ -51,7 +51,7 @@ func (as *AgentServer) reportMetrics(ctx context.Context, run *agentRun) {
 func (as *AgentServer) collectFinalMetrics(run *agentRun) error {
 	ctx, cancel := context.WithTimeout(context.Background(), FinalMetricsTimeout)
 	defer cancel()
-	err := as.options.CollectMetrics(ctx, run.context)
+	err := as.options.CustomIngestMetrics(ctx, run.context)
 	if err == nil {
 		err = ctx.Err()
 	}

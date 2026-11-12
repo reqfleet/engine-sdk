@@ -72,7 +72,7 @@
 // # Metrics integration
 //
 // Adapters map result-file events with MetricParser, update a MetricsRegistry
-// directly (optionally using CollectMetrics for SDK-scheduled collection), or
+// directly (optionally using CustomIngestMetrics for adapter-specific ingestion), or
 // declare MetricsSchemaShibuyaV1 for a normalized MetricsHandler or MetricsURL.
 // Parser, collection callback, and native sources are mutually exclusive. Registry-only
 // serving without ingestion does not provide complete request reporting.
@@ -84,8 +84,10 @@
 // events. Direct callers supply identity from RunContext and validate/admit names
 // before recording. There are no global collectors. Reset clears all series;
 // synchronize it with adapter state at the next BeforeStart.
-// CollectMetrics runs after launch and every 250ms, separately from Observe and
-// Progress. Honor cancellation; the SDK joins live callbacks and processes before
+// CustomIngestMetrics lets adapters normalize independent engine samples that
+// do not fit MetricParser's complete-request event model. The SDK runs it after
+// launch and every 250ms, separately from Observe and Progress.
+// Honor cancellation; the SDK joins live callbacks and processes before
 // a final call with a fresh two-second context. Collection errors fail the run
 // and registry scrapes until reset or the next launch. Retain final metrics for
 // post-exit scrapes; HTTP requests never invoke collection.

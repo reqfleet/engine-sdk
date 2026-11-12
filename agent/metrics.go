@@ -172,7 +172,7 @@ func (r *MetricsRegistry) Reset() {
 }
 
 // Gather implements prometheus.Gatherer without collecting new samples. A
-// CollectMetrics failure is returned until Reset or the next successful launch.
+// CustomIngestMetrics failure is returned until Reset or the next successful launch.
 func (r *MetricsRegistry) Gather() ([]*dto.MetricFamily, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
