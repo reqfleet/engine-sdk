@@ -4,6 +4,7 @@ package conformance
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -122,6 +123,49 @@ func runFixtureAdapter() error {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			var mode string
+			if len(run.Settings) > 0 {
+				if err := json.Unmarshal(run.Settings, &mode); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if mode != "" {
+				identity := fmt.Sprintf("collection_id=%q,plan_id=%q,run_id=%q,engine_no=\"7\",zone=\"local\"",
+					run.CollectionID, run.PlanID, run.RunID)
+				count := string(body)
+				var observations []float64
+				if strings.HasPrefix(mode, "zero-") {
+					count = "0"
+					observations = []float64{}
+				} else {
+					latency, err := os.ReadFile(filepath.Join(run.Workspace.Results, run.RunID+".requests.latency"))
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					value, err := strconv.ParseFloat(string(latency), 64)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					observations = []float64{value}
+				}
+				if mode == "status" || mode == "zero-status" || mode == "zero-all" {
+					fmt.Fprintf(w, "# TYPE %s counter\n%s{%s,label=\"fixture\",status=\"200\"} %s\n",
+						metricschema.StatusCounter, metricschema.StatusCounter, identity, count)
+				}
+				if mode == "latency" || mode == "zero-latency" || mode == "zero-all" {
+					_, _ = io.WriteString(w, latencyMetricFixture(metricschema.RequestLatency, identity, "fixture", observations))
+				}
+				if mode == "llm" || mode == "zero-llm" || mode == "zero-all" {
+					_, _ = io.WriteString(w, latencyMetricFixture(metricschema.LLMResponseLatency, identity, "llm_resp", observations))
+				}
+				fmt.Fprintf(w, "# TYPE shibuya_egress_bytes_counter counter\nshibuya_egress_bytes_counter{%s,label=\"aggregate\"} 0\n", identity)
+				fmt.Fprintf(w, "# TYPE shibuya_cpu_gauge gauge\nshibuya_cpu_gauge{%s} 0\n", identity)
+				fmt.Fprintf(w, "# TYPE shibuya_mem_gauge gauge\nshibuya_mem_gauge{%s} 0\n", identity)
+				return
+			}
 			fmt.Fprintf(w, "# TYPE %s counter\n%s{collection_id=%q,plan_id=%q,run_id=%q,engine_no=\"7\",zone=\"local\",label=\"fixture\",status=\"200\"} %s\n",
 				metricschema.StatusCounter, metricschema.StatusCounter, run.CollectionID, run.PlanID, run.RunID, body)
 		}),
@@ -142,6 +186,7 @@ func runFixtureWorkload() error {
 	if err := writeFixturePID("engine.pid"); err != nil {
 		return err
 	}
+	started := time.Now()
 	response, err := (&http.Client{Timeout: time.Second}).Get(TargetURL + "/fixture")
 	if err != nil {
 		return err
@@ -153,6 +198,10 @@ func runFixtureWorkload() error {
 	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("fixture request returned HTTP %d", response.StatusCode)
+	}
+	latency := strconv.FormatFloat(float64(time.Since(started))/float64(time.Millisecond), 'g', -1, 64)
+	if err := os.WriteFile(os.Args[3]+".latency", []byte(latency), 0600); err != nil {
+		return err
 	}
 	if err := os.WriteFile(os.Args[3], []byte("1"), 0600); err != nil {
 		return err

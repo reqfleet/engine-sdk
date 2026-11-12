@@ -166,6 +166,84 @@ func TestRuntimeBasicRejectsUnsuccessfulCompletion(t *testing.T) {
 	}
 }
 
+func TestRuntimeBasicRequiresPositiveRequestMeasurements(t *testing.T) {
+	requireRuntimeContainer(t)
+	const marker = "CONFORMANCE_REQUEST_MEASUREMENT"
+	if mode := os.Getenv(marker); mode != "" {
+		contract := fixtureContract(t, "complete")
+		settings, err := json.Marshal(mode)
+		require.NoError(t, err)
+		contract.Basic.Complete.Settings = settings
+		assertDefault := contract.Basic.AssertMetrics
+		contract.Basic.AssertMetrics = func(t *testing.T, runtime *Runtime, id string) MetricsSnapshot {
+			if id != "8901" {
+				return assertDefault(t, runtime, id)
+			}
+			body, err := os.ReadFile(filepath.Join(runtime.Root, "test-result", id+".requests"))
+			require.NoError(t, err)
+			count, err := strconv.ParseUint(string(body), 10, 64)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), count, "the native fixture must complete its real request")
+			observations := []float64{}
+			if strings.HasPrefix(mode, "zero-") {
+				count = 0
+			} else {
+				body, err := os.ReadFile(filepath.Join(runtime.Root, "test-result", id+".requests.latency"))
+				require.NoError(t, err)
+				latency, err := strconv.ParseFloat(string(body), 64)
+				require.NoError(t, err)
+				observations = append(observations, latency)
+			}
+			request := RequestExpectation{}
+			if mode == "status" || mode == "zero-status" || mode == "zero-all" {
+				request.Statuses = map[string]uint64{"200": count}
+			}
+			if mode == "latency" || mode == "zero-latency" || mode == "zero-all" {
+				request.LatenciesMS = observations
+			}
+			expected := MetricsExpectation{
+				Identity:  MetricIdentity{CollectionID: CollectionID, PlanID: PlanID, RunID: id, EngineNo: "7", Zone: "local"},
+				Requests:  make(map[string]RequestExpectation),
+				Bytes:     map[string]float64{"aggregate": 0},
+				Resources: ResourceExpectation{CPU: MeasurementRequired, Memory: MeasurementRequired},
+			}
+			if request.Statuses != nil || request.LatenciesMS != nil {
+				expected.Requests["fixture"] = request
+			}
+			if mode == "llm" || mode == "zero-llm" || mode == "zero-all" {
+				expected.Requests["llm_resp"] = RequestExpectation{LLMResponseLatenciesMS: observations}
+			}
+			snapshot := AssertMetrics(t, runtime.Scrape(t), expected)
+			fmt.Printf("validated request measurements=%s\n", mode)
+			return snapshot
+		}
+		runtime := startRuntime(t, contract)
+		runBasic(t, runtime, contract.Basic)
+		fmt.Println("completed lifecycle with independent request measurements")
+		return
+	}
+	self, err := os.Executable()
+	require.NoError(t, err)
+	for _, mode := range []string{"zero-status", "zero-latency", "zero-llm", "zero-all", "zero-other", "status", "latency", "llm"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, self, "-test.run=^TestRuntimeBasicRequiresPositiveRequestMeasurements$", "-test.timeout=35s", "-test.v")
+			command.Env = append(os.Environ(), marker+"="+mode)
+			command.WaitDelay = time.Second
+			output, err := command.CombinedOutput()
+			require.NoError(t, ctx.Err(), "%s", output)
+			require.Contains(t, string(output), "validated request measurements="+mode)
+			if strings.HasPrefix(mode, "zero-") {
+				require.Error(t, err, "zero-only measurements must fail the lifecycle suite: %s", output)
+			} else {
+				require.NoError(t, err, "%s", output)
+				require.Contains(t, string(output), "completed lifecycle with independent request measurements")
+			}
+		})
+	}
+}
+
 type runtimeTransportFunc func(*http.Request) (*http.Response, error)
 
 func (transport runtimeTransportFunc) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -389,12 +467,99 @@ func TestRuntimeCleanupStopsActiveRunAfterRejectedOverlap(t *testing.T) {
 	require.Equal(t, int64(1), finalized.Load(), "cleanup must gracefully finalize the admitted workload despite the rejected overlap")
 }
 
-func TestRuntimeCleanupCancelsArtifactPreparation(t *testing.T) {
+func TestRuntimeCleanupUsesAddressedStartVerb(t *testing.T) {
+	requireRuntimeContainer(t)
+	for _, envelope := range []string{"", protocol.VerbStop} {
+		t.Run("envelope="+envelope, func(t *testing.T) {
+			var finalized atomic.Int64
+			t.Run("scenario", func(t *testing.T) {
+				contract := fixtureContract(t, "complete")
+				contract.Artifacts["graceful.txt"] = "graceful"
+				contract.Target = http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					if request.URL.Path == "/finalize" {
+						finalized.Add(1)
+					}
+					_, _ = io.WriteString(w, "real fixture response")
+				})
+				runtime := startRuntime(t, contract)
+				foreign := Payload(protocol.VerbStart, "foreign", "graceful.txt", nil)
+				foreign.PlanMessage["other-plan"] = foreign.PlanMessage[proofPlan]
+				delete(foreign.PlanMessage, proofPlan)
+				runtime.Send(t, foreign)
+				payload := Payload(protocol.VerbStart, "8901", "graceful.txt", nil)
+				payload.Verb = envelope
+				runtime.Send(t, payload)
+				runtime.Running(t, "8901")
+				runtime.AwaitRequests(t, "8901", 1)
+				require.Equal(t, int64(1), runtime.Downloads(), "foreign plans must not download or execute")
+				require.Zero(t, finalized.Load())
+				// Registered cleanup must stop the addressed Start, regardless
+				// of the envelope verb, before forced supervisor teardown.
+			})
+			require.Equal(t, int64(1), finalized.Load(), "cleanup must gracefully finalize the addressed workload")
+		})
+	}
+}
+
+func TestRuntimeBlockedArtifactAvoidsSuppliedPaths(t *testing.T) {
 	requireRuntimeContainer(t)
 	for _, verb := range []string{protocol.VerbStart, protocol.VerbPrepare} {
 		t.Run(verb, func(t *testing.T) {
+			contract := fixtureContract(t, "complete")
+			contract.Basic.Complete.File = "conformance-blocked.txt"
+			contract.Artifacts[contract.Basic.Complete.File] = "complete"
+			dependency, err := protocol.DependencyFilePath(proofCollection, proofPlan, "conformance-blocked-2.txt")
+			require.NoError(t, err)
+			contract.DataArtifacts = map[string]string{
+				proofArtifactPath(t, "conformance-blocked-1.txt"):  "complete",
+				path.Join(protocol.ArtifactPathPrefix, dependency): "block preparation",
+			}
+			runtime := startRuntime(t, contract)
+			for index, file := range []string{contract.Basic.Complete.File, "conformance-blocked-1.txt"} {
+				id := fmt.Sprintf("complete-%d", index)
+				runtime.Start(t, id, Fixture{File: file})
+				runtime.Terminal(t, id, protocol.RunCompleted, proofWait)
+				contract.Basic.AssertMetrics(t, runtime, id)
+			}
+			prepare := Payload(protocol.VerbPrepare, "real-dependency", contract.Basic.Complete.File, nil)
+			prepare.PlanMessage[proofPlan].DependencyFile = "conformance-blocked-2.txt"
+			runtime.Send(t, prepare)
+			require.Eventually(t, func() bool {
+				body, err := os.ReadFile(filepath.Join(runtime.Root, "preparing"))
+				return err == nil && string(body) == "block preparation"
+			}, proofWait, 10*time.Millisecond, "the supplied dependency must reach its real preparation hook")
+			runtime.Stop(t, "real-dependency")
+			runtime.Terminal(t, "real-dependency", protocol.RunCanceled, proofWait)
+
+			payload := Payload(verb, "8901", runtime.BlockedFile(), nil)
+			if verb == protocol.VerbPrepare {
+				payload.PlanMessage[proofPlan].DependencyFile = runtime.BlockedFile()
+			}
+			runtime.Send(t, payload)
+			runtime.AwaitDownload(t)
+			runtime.stopSubmitted(proofWait)
+			runtime.AwaitDownloadCancellation(t)
+			assertFixtureCanceledWhileAlive(t, runtime, verb == protocol.VerbPrepare)
+		})
+	}
+}
+
+func TestRuntimeCleanupCancelsArtifactPreparation(t *testing.T) {
+	requireRuntimeContainer(t)
+	for _, test := range []struct {
+		verb     string
+		envelope string
+	}{
+		{protocol.VerbStart, protocol.VerbStart},
+		{protocol.VerbPrepare, protocol.VerbPrepare},
+		{protocol.VerbPrepare, ""},
+		{protocol.VerbPrepare, protocol.VerbStop},
+	} {
+		t.Run(test.verb+"/envelope="+test.envelope, func(t *testing.T) {
+			verb := test.verb
 			runtime := startRuntime(t, fixtureContract(t, "complete"))
 			payload := Payload(verb, "8901", runtime.BlockedFile(), nil)
+			payload.Verb = test.envelope
 			want := protocol.RunStarting
 			if verb == protocol.VerbPrepare {
 				payload.PlanMessage[proofPlan].DependencyFile = runtime.BlockedFile()

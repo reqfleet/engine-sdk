@@ -174,15 +174,31 @@ func startRuntime(t *testing.T, contract Contract) *Runtime {
 	startProofDNS(t)
 	certificate, ca := proofCertificate(t)
 	r := &Runtime{peer: newProofPeer(t, certificate), LabelLimit: contract.LabelLimit, blockedDownload: make(chan struct{}, 1), endedDownload: make(chan struct{}, 1)}
-	r.blockedFile = "conformance-blocked" + filepath.Ext(contract.Basic.Complete.File)
-	blockedDependency, err := protocol.DependencyFilePath(proofCollection, proofPlan, r.blockedFile)
-	require.NoError(t, err)
 	artifacts := make(map[string]string, len(contract.Artifacts)+len(contract.DataArtifacts))
 	for name, body := range contract.Artifacts {
 		artifacts[proofArtifactPath(t, name)] = body
 	}
 	for name, body := range contract.DataArtifacts {
 		artifacts[name] = body
+	}
+	extension := filepath.Ext(contract.Basic.Complete.File)
+	var blockedTest, blockedDependency string
+	for suffix := 0; ; suffix++ {
+		name := "conformance-blocked"
+		if suffix > 0 {
+			name += "-" + strconv.Itoa(suffix)
+		}
+		r.blockedFile = name + extension
+		blockedTest = proofArtifactPath(t, r.blockedFile)
+		dependency, err := protocol.DependencyFilePath(proofCollection, proofPlan, r.blockedFile)
+		require.NoError(t, err)
+		blockedDependency = path.Join(protocol.ArtifactPathPrefix, dependency)
+		if _, exists := artifacts[blockedTest]; exists {
+			continue
+		}
+		if _, exists := artifacts[blockedDependency]; !exists {
+			break
+		}
 	}
 	if contract.Target != nil {
 		startProofHTTP(t, "127.0.0.1:18080", contract.Target, nil)
@@ -194,7 +210,7 @@ func startRuntime(t *testing.T, contract Contract) *Runtime {
 			return
 		}
 		r.downloads.Add(1)
-		if request.URL.Path == proofArtifactPath(t, r.blockedFile) || request.URL.Path == path.Join(protocol.ArtifactPathPrefix, blockedDependency) {
+		if request.URL.Path == blockedTest || request.URL.Path == blockedDependency {
 			select {
 			case r.blockedDownload <- struct{}{}:
 			default:
@@ -330,7 +346,23 @@ func runBasic(t *testing.T, r *Runtime, basic BasicScenarios) {
 	first := r.Start(t, "8901", basic.Complete)
 	r.Terminal(t, "8901", protocol.RunCompleted, basic.CompletionTimeout)
 	final := basic.AssertMetrics(t, r, "8901")
-	require.NotEmpty(t, final.Requests, "fixture must generate real requests")
+	hasRequests := false
+	for _, request := range final.Requests {
+		for _, count := range request.Statuses {
+			if count > 0 {
+				hasRequests = true
+				break
+			}
+		}
+		if request.Latency != nil && request.Latency.Count > 0 ||
+			request.LLMResponseLatency != nil && request.LLMResponseLatency.Count > 0 {
+			hasRequests = true
+		}
+		if hasRequests {
+			break
+		}
+	}
+	require.True(t, hasRequests, "fixture must generate real requests")
 	require.Equal(t, final, basic.AssertMetrics(t, r, "8901"), "final metrics must be retained without double ingestion")
 	before := r.Downloads()
 	r.Send(t, first)
@@ -390,17 +422,17 @@ func (r *Runtime) Start(t *testing.T, id string, fixture Fixture) protocol.Paylo
 	return payload
 }
 
-// Send submits a protocol command and tracks every start or prepare run ID for
-// cleanup, including commands the adapter may reject as overlapping.
+// Send submits a protocol command unchanged and tracks nonempty start or prepare
+// run IDs addressed to the harness plan for cleanup, including rejected overlaps.
 func (r *Runtime) Send(t *testing.T, payload protocol.Payload) {
 	t.Helper()
-	if payload.Verb == protocol.VerbStart || payload.Verb == protocol.VerbPrepare {
+	message := payload.PlanMessage[proofPlan]
+	if message != nil && message.RunID != "" &&
+		(message.Verb == protocol.VerbStart || message.Verb == protocol.VerbPrepare) {
 		if r.started == nil {
 			r.started = make(map[string]struct{})
 		}
-		if id := payload.PlanMessage[proofPlan].RunID; id != "" {
-			r.started[id] = struct{}{}
-		}
+		r.started[message.RunID] = struct{}{}
 	}
 	require.NoError(t, r.peer.send(payload))
 }

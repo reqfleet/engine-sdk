@@ -13,4 +13,4 @@ FROM debian:bookworm-slim
 RUN mkdir -p /test-data && chown 65532:65532 /test-data
 COPY --from=build /out/conformance-runtime /usr/local/bin/conformance-runtime
 USER 0:0
-ENTRYPOINT ["/usr/local/bin/conformance-runtime", "-test.v", "-test.timeout=2m"]
+ENTRYPOINT ["/usr/local/bin/conformance-runtime", "-test.v", "-test.timeout=3m"]

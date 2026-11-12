@@ -8,8 +8,9 @@
 //
 // AssertMetrics and the expectation/snapshot types are available without build
 // tags. They check normalized exposition against measurements supplied by the
-// adapter author. The [SDK metrics contract] remains authoritative for names,
-// labels, units, histogram boundaries, and accumulation semantics.
+// adapter author, including ordinary and quoted metric names inside or outside
+// braces. The [SDK metrics contract] remains authoritative for names, labels,
+// units, histogram boundaries, and accumulation semantics.
 //
 // Expected values must come from independently parsed engine-native output or
 // other independent workload evidence, not from the normalized scrape being
@@ -28,8 +29,10 @@
 // Scenarios callback. Fixtures supply engine-specific settings and artifact names.
 // BasicScenarios.AssertMetrics supplies the independent native-output oracle and
 // returns a validated MetricsSnapshot. It must work for both lifecycle fixtures
-// and every budget fixture. Complete must terminate naturally; Reuse and budget
-// fixtures must remain active until stopped and generate real HTTP requests.
+// and every budget fixture. Complete must terminate naturally and report at least
+// one positive status count or latency observation; zero-initialized series alone
+// do not prove workload execution. Reuse and budget fixtures must remain active
+// until stopped and generate real HTTP requests.
 //
 // Run owns authenticated TLS command and artifact peers, request authentication
 // checks, lifecycle and cancellation checks, duplicate/stale command handling,
@@ -41,6 +44,9 @@
 // AwaitRequests tolerates transient scrape failures only while waiting for the
 // requested run's measurements within Wait. Explicit Scrape calls and final
 // metric assertions still require a successful response.
+// Send tracks cleanup by the command addressed to the harness plan, not the
+// envelope verb. BlockedFile chooses a synthetic test/dependency artifact name
+// that does not shadow supplied artifacts.
 //
 // # Container isolation and prerequisites
 //
@@ -87,7 +93,8 @@
 // consumer's conformance image and execute them sequentially, as root, only in
 // the isolated disposable container described above. Allow sufficient test
 // timeouts for natural completion and bounded cleanup. Shared regressions cover
-// short-lived completion, unsuccessful completion, preparation cancellation,
+// short-lived completion, unsuccessful completion, zero-only request measurements,
+// preparation cancellation, addressed-command cleanup, artifact-name collisions,
 // rejected overlaps, stale stops that initiate slow shutdown, transient scrape
 // recovery, query-sensitive run IDs, cleanup deadlines, separate process groups,
 // and live orphan reaping using a real SDK fixture adapter and child HTTP workloads.

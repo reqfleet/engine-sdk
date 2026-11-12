@@ -120,7 +120,7 @@ func validateMetrics(exposition string, expected MetricsExpectation) (MetricsSna
 		return snapshot, err
 	}
 	parser := expfmt.NewTextParser(model.UTF8Validation)
-	families, err := parser.TextToMetricFamilies(strings.NewReader(exposition))
+	families, err := parser.TextToMetricFamilies(strings.NewReader(normalizeMetricNames(exposition)))
 	if err != nil {
 		return snapshot, fmt.Errorf("parse exposition: %w", err)
 	}
@@ -306,6 +306,77 @@ func validateMetrics(exposition string, expected MetricsExpectation) (MetricsSna
 		}
 	}
 	return snapshot, nil
+}
+
+// normalizeMetricNames moves a standalone in-braces name ahead of its labels.
+// expfmt otherwise interprets labels using the preceding family's type until it
+// reaches the name, and even a name in first position can inherit histogram state.
+// Call only after raw validation; preserve metadata, sample values and timestamps.
+func normalizeMetricNames(exposition string) string {
+	var normalized strings.Builder
+	offset, copied := 0, 0
+	for line := range strings.Lines(exposition) {
+		sample := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(sample, "{") {
+			start, end := bracedMetricNameRange(sample)
+			if end > start {
+				if normalized.Len() == 0 {
+					normalized.Grow(len(exposition))
+				}
+				normalized.WriteString(exposition[copied:offset])
+				normalized.WriteString(line[:len(line)-len(sample)])
+				normalized.WriteString(strings.TrimSpace(sample[start:end]))
+				normalized.WriteByte('{')
+				if sample[end] == ',' {
+					normalized.WriteString(sample[1:start])
+					normalized.WriteString(sample[end+1:])
+				} else {
+					// A last-position name takes its preceding comma with it.
+					if start > 1 {
+						normalized.WriteString(sample[1 : start-1])
+					}
+					normalized.WriteString(sample[end:])
+				}
+				copied = offset + len(line)
+			}
+		}
+		offset += len(line)
+	}
+	if normalized.Len() == 0 {
+		return exposition
+	}
+	normalized.WriteString(exposition[copied:])
+	return normalized.String()
+}
+
+// As in the native validator, scan already parsed fields without interpreting
+// escaped label content as delimiters. A standalone field is the metric name.
+func bracedMetricNameRange(line string) (int, int) {
+	start := 1
+	quoted, assignment := false, false
+	for i := 1; i < len(line); i++ {
+		if quoted {
+			switch line[i] {
+			case '\\':
+				i++
+			case '"':
+				quoted = false
+			}
+			continue
+		}
+		switch line[i] {
+		case '"':
+			quoted = true
+		case '=':
+			assignment = true
+		case ',', '}':
+			if !assignment {
+				return start, i
+			}
+			start, assignment = i+1, false
+		}
+	}
+	return 0, 0
 }
 
 // Like the SDK native validator, check raw histogram components separately:

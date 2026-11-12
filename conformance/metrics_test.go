@@ -310,6 +310,148 @@ func TestMetricValidationIgnoresExpositionOrderAndUnrelatedCollectors(t *testing
 	require.Equal(t, first, second)
 }
 
+func TestAssertMetricsEquivalentMetricNameSyntax(t *testing.T) {
+	text, expected := metricFixture()
+	// Include escaped delimiters, both independent histogram profiles, and
+	// explicit zero-observation histograms alongside nonzero measurements.
+	label := "request,} # TYPE \"quoted\" \\\nnext"
+	text = strings.ReplaceAll(text, `"/a?x=1"`, fmt.Sprintf("%q", label))
+	expected.Requests[label] = expected.Requests["/a?x=1"]
+	delete(expected.Requests, "/a?x=1")
+	text += strings.TrimPrefix(
+		latencyMetricFixture("shibuya_latency_label_milliseconds", metricTestIdentity, "empty", nil),
+		"# TYPE shibuya_latency_label_milliseconds histogram\n",
+	)
+	expected.Requests["empty"] = RequestExpectation{LatenciesMS: []float64{}}
+	llm := []float64{100, 7500, 300000, 400000}
+	text += latencyMetricFixture("shibuya_latency_llm_resp_milliseconds", metricTestIdentity, "llm_resp", llm)
+	text += strings.TrimPrefix(
+		latencyMetricFixture("shibuya_latency_llm_resp_milliseconds", metricTestIdentity, "others", nil),
+		"# TYPE shibuya_latency_llm_resp_milliseconds histogram\n",
+	)
+	expected.Requests["llm_resp"] = RequestExpectation{LLMResponseLatenciesMS: llm}
+	expected.Requests["others"] = RequestExpectation{LLMResponseLatenciesMS: []float64{}}
+	want := AssertMetrics(t, text, expected)
+
+	for _, syntax := range []string{"ordinary", "quoted", "first", "middle", "last", "mixed"} {
+		for _, reverseTypes := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reverseTypes=%t", syntax, reverseTypes), func(t *testing.T) {
+				var headers []string
+				var samples strings.Builder
+				for line := range strings.Lines(metricNameSyntaxFixture(text, syntax)) {
+					if strings.HasPrefix(line, "#") {
+						headers = append(headers, line)
+						continue
+					}
+					// Explicit timestamps remain legal profile input. Moving a
+					// metric name must not consume or rewrite the sample tail.
+					samples.WriteString(strings.TrimSuffix(line, "\n") + " 123456\n")
+				}
+				var grouped strings.Builder
+				grouped.WriteString("# HELP shibuya_latency_label_milliseconds Request latency\n")
+				for i := range headers {
+					index := i
+					if reverseTypes {
+						index = len(headers) - 1 - i
+					}
+					grouped.WriteString(headers[index])
+				}
+				grouped.WriteString("# TYPE unrelated gauge\nunrelated 0\n")
+				grouped.WriteString(samples.String())
+				require.Equal(t, want, AssertMetrics(t, grouped.String(), expected))
+			})
+		}
+	}
+}
+
+// Rewrite only the fixture's sample-name spelling, keeping labels and tails.
+func metricNameSyntaxFixture(text, syntax string) string {
+	var result strings.Builder
+	index := 0
+	for line := range strings.Lines(text) {
+		name, rest, sample := strings.Cut(line, "{")
+		if !sample || strings.HasPrefix(line, "#") {
+			result.WriteString(line)
+			continue
+		}
+		style := syntax
+		if style == "mixed" {
+			style = []string{"ordinary", "quoted", "first", "middle", "last"}[index%5]
+		}
+		index++
+		close := strings.LastIndex(rest, "}")
+		labels, tail := rest[:close], rest[close:]
+		switch style {
+		case "ordinary":
+			result.WriteString(line)
+		case "quoted":
+			fmt.Fprintf(&result, "%q{%s%s", name, labels, tail)
+		case "first":
+			fmt.Fprintf(&result, " \t{ %q ,%s%s", name, labels, tail)
+		case "middle":
+			first, remaining, _ := strings.Cut(labels, ",")
+			fmt.Fprintf(&result, "{%s, %q ,%s%s", first, name, remaining, tail)
+		case "last":
+			fmt.Fprintf(&result, "{%s, %q %s", labels, name, tail)
+		}
+	}
+	return result.String()
+}
+
+func TestMetricValidationBracedNamesRetainMalformedChecks(t *testing.T) {
+	for _, family := range []string{"shibuya_latency_label_milliseconds", "shibuya_latency_llm_resp_milliseconds"} {
+		_, fixture := metricFixture()
+		request := RequestExpectation{LatenciesMS: []float64{}}
+		firstBound, wrongProfileBound := "1", "7500"
+		if family == "shibuya_latency_llm_resp_milliseconds" {
+			request = RequestExpectation{LLMResponseLatenciesMS: []float64{}}
+			firstBound, wrongProfileBound = "100", "1"
+		}
+		expected := MetricsExpectation{
+			Identity: fixture.Identity,
+			Requests: map[string]RequestExpectation{"llm_resp": request},
+		}
+		text := latencyMetricFixture(family, metricTestIdentity, "llm_resp", nil)
+		text = strings.Replace(text, " histogram\n", " histogram\n# TYPE unrelated gauge\nunrelated 0\n", 1)
+		labels := metricTestIdentity + `,label="llm_resp"`
+		sum := fmt.Sprintf("%s_sum{%s} 0\n", family, labels)
+		cases := map[string]string{
+			"duplicate sum":       text + sum,
+			"duplicate count":     text + fmt.Sprintf("%s_count{%s} 0\n", family, labels),
+			"duplicate bucket":    text + fmt.Sprintf("%s_bucket{%s,le=%q} 0\n", family, labels, firstBound),
+			"base sample":         text + fmt.Sprintf("%s{%s} 0\n", family, labels),
+			"missing bucket":      strings.Replace(text, fmt.Sprintf("%s_bucket{%s,le=%q} 0\n", family, labels, firstBound), "", 1),
+			"missing sum":         strings.Replace(text, sum, "", 1),
+			"sum with bound":      strings.Replace(text, sum, fmt.Sprintf("%s_sum{%s,le=%q} 0\n", family, labels, firstBound), 1),
+			"duplicate label":     strings.Replace(text, `label="llm_resp"`, `label="llm_resp",label="llm_resp"`, 1),
+			"unterminated value":  strings.Replace(text, `label="llm_resp"`, `label="llm_resp`, 1),
+			"wrong declared type": strings.Replace(text, " histogram\n", " gauge\n", 1),
+			"duplicate type":      text + fmt.Sprintf("# TYPE %s histogram\n", family),
+			"fractional count":    strings.Replace(text, "_count{"+labels+"} 0", "_count{"+labels+"} 0.5", 1),
+		}
+		for _, bound := range []string{"NaN", "invalid", "-Inf", "1e999", wrongProfileBound} {
+			cases["invalid bound "+bound] = strings.Replace(text, `le="`+firstBound+`"`, fmt.Sprintf("le=%q", bound), 1)
+		}
+		for _, syntax := range []string{"first", "middle", "last", "mixed"} {
+			t.Run(family+"/"+syntax, func(t *testing.T) {
+				AssertMetrics(t, metricNameSyntaxFixture(text, syntax), expected)
+				for name, malformed := range cases {
+					t.Run(name, func(t *testing.T) {
+						_, err := validateMetrics(metricNameSyntaxFixture(malformed, syntax), expected)
+						require.Error(t, err)
+					})
+				}
+				_, err := validateMetrics(metricNameSyntaxFixture(text, syntax)+sum, expected)
+				require.Error(t, err, "ordinary and braced spellings are the same raw series")
+				multipleNames := metricNameSyntaxFixture(text, "last") +
+					fmt.Sprintf("{%s,%q,%q} 0\n", labels, family+"_sum", family+"_count")
+				_, err = validateMetrics(multipleNames, expected)
+				require.Error(t, err, "normalization must not repair multiple standalone names")
+			})
+		}
+	}
+}
+
 // These fixtures deliberately state both SDK profiles independently of the
 // validator, so changing its accepted bounds cannot silently change the oracle.
 func latencyMetricFixture(name, identity, label string, observations []float64) string {
