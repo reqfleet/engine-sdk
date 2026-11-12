@@ -126,8 +126,9 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	stopMonitor()
 	monitors.Wait()
 	readers.Wait()
+	var metricsErr error
 	if as.options.CustomIngestMetrics != nil {
-		waitErr = errors.Join(waitErr, as.collectFinalMetrics(run))
+		metricsErr = as.collectFinalMetrics(run)
 	}
 	if as.metrics != nil {
 		as.sampleOwnMetrics()
@@ -142,6 +143,10 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	phase := protocol.FailureExecution
 	if run.status.StartupStatus == protocol.StartupStatePending {
 		phase = protocol.FailureStartup
+	}
+	if metricsErr != nil && run.failure == nil {
+		run.failure = metricsErr
+		run.failurePhase = phase
 	}
 	as.finishRunLocked(run, waitErr, phase, exitCode)
 	as.stateLock.Unlock()

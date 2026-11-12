@@ -98,14 +98,24 @@ func TestMetricsCollectionJoinsAndDrainsFinalOutputBeforeRelease(t *testing.T) {
 }
 
 func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
-	for _, finalFailure := range []bool{false, true} {
-		name := "live"
-		if finalFailure {
-			name = "final"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		final    bool
+		stop     bool
+		deadline bool
+	}{
+		{name: "live"},
+		{name: "final", final: true},
+		{name: "scheduled final", final: true, stop: true},
+		{name: "scheduled deadline", final: true, stop: true, deadline: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			registry := NewMetricsRegistry()
 			failure := errors.New("invalid engine output")
+			if test.deadline {
+				failure = context.DeadlineExceeded
+			}
+			liveEntered := make(chan struct{})
 			recorded := false // Live and final collection must be serialized.
 			f := newAgentFixture(t, AgentServerOptions{
 				MetricsRegistry: registry,
@@ -115,17 +125,26 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 					return nil
 				},
 				BuildCommand: func(_ context.Context, run RunContext) (Command, error) {
-					if run.RunID == "bad" && !finalFailure {
+					if run.RunID == "bad" && (!test.final || test.stop) {
 						return Command{Command: "sleep", Args: []string{"30"}}, nil
 					}
 					return Command{Command: "true"}, nil
 				},
 				CustomIngestMetrics: func(ctx context.Context, run RunContext) error {
 					if run.RunID == "bad" {
-						if _, final := ctx.Deadline(); finalFailure && !final {
+						if _, final := ctx.Deadline(); test.final && !final {
+							if test.stop {
+								close(liveEntered)
+								<-ctx.Done()
+								return ctx.Err()
+							}
 							return nil
 						}
 						registry.ObserveRequest(ShibuyaMetric{RunID: run.RunID, Label: "partial", Status: "200", Latency: 1})
+						if test.deadline {
+							<-ctx.Done()
+							return nil
+						}
 						return failure
 					}
 					if !recorded {
@@ -136,7 +155,19 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 				},
 			}, nil)
 			f.send(runMessage(protocol.VerbStart, "bad", ""))
-			waitRunState(t, f, "bad", protocol.RunFailed)
+			if test.stop {
+				select {
+				case <-liveEntered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("live collection did not start")
+				}
+				f.server.stopRun("bad", protocol.StopCompleted)
+			}
+			status := waitRunState(t, f, "bad", protocol.RunFailed)
+			assert.Equal(t, protocol.FailureExecution, status.FailurePhase)
+			if test.stop {
+				assert.Equal(t, protocol.StopCompleted, status.StopReason)
+			}
 			_, err := registry.Gather()
 			require.ErrorIs(t, err, failure)
 			response := nativeResponse(f.server.metricsHandler())
@@ -150,4 +181,72 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 			assert.Equal(t, "good", nativeLabelValue(families[metricschema.StatusCounter].Metric[0], "run_id"))
 		})
 	}
+}
+
+func TestMetricsCollectionFailureSurvivesConcurrentProcessExit(t *testing.T) {
+	failure := errors.New("invalid engine output")
+	server := NewAgentServer(AgentServerOptions{
+		CustomIngestMetrics: func(ctx context.Context, _ RunContext) error {
+			if _, final := ctx.Deadline(); final {
+				return nil
+			}
+			return failure
+		},
+	})
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	run := &agentRun{
+		context:  RunContext{RunID: "run"},
+		ctx:      runCtx,
+		cancel:   cancel,
+		busy:     true,
+		launched: true,
+		status: protocol.RunStatus{
+			RunID: "run", State: protocol.RunRunning, StartupStatus: protocol.StartupStateStarted,
+		},
+	}
+	server.runtime.run = run
+	monitorCtx, stopMonitor := context.WithCancel(runCtx)
+	defer stopMonitor()
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("live collection did not stop")
+		}
+	})
+	func() {
+		server.stateLock.Lock()
+		defer server.stateLock.Unlock()
+		go func() {
+			defer close(done)
+			server.customIngesterRunner(monitorCtx, run)
+		}()
+		// Hold the lifecycle lock until the live error is accepted, then model
+		// process exit before the collector can record its lifecycle failure.
+		require.Eventually(t, func() bool {
+			_, err := server.metrics.Gather()
+			return errors.Is(err, failure)
+		}, 5*time.Second, time.Millisecond)
+		run.exited = true
+		stopMonitor()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("live collection did not finish after process exit")
+	}
+	require.NoError(t, server.collectFinalMetrics(run))
+	server.stateLock.Lock()
+	server.finishRunLocked(run, nil, protocol.FailureExecution, 0)
+	server.stateLock.Unlock()
+
+	status := readProgressForTest(t, server)
+	assert.Equal(t, protocol.RunFailed, status.State)
+	assert.Equal(t, protocol.FailureExecution, status.FailurePhase)
+	_, err := server.metrics.Gather()
+	require.ErrorIs(t, err, failure)
+	assert.Equal(t, http.StatusInternalServerError, nativeResponse(server.metricsHandler()).Code)
 }

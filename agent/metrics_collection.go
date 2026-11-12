@@ -25,7 +25,8 @@ func (as *AgentServer) customIngesterRunner(ctx context.Context, run *agentRun) 
 			err = fmt.Errorf("collect engine metrics: %w", err)
 			as.metrics.setCollectionError(err)
 			as.stateLock.Lock()
-			if run.ctx.Err() == nil && !run.exited {
+			// An accepted collection error survives a concurrent exit or stop.
+			if run.failure == nil {
 				run.failure = err
 				run.failurePhase = protocol.FailureExecution
 				if run.status.StartupStatus == protocol.StartupStatePending {

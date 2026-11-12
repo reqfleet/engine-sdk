@@ -102,15 +102,18 @@ and CPU/memory reporting; the callback must not duplicate those responsibilities
 The SDK invokes this callback after launch and every 250 milliseconds,
 independently of scrapes and the readiness/progress loops.
 Honor its context and synchronize adapter state with `Observe`. An uncanceled
-collection error fails the run and initiates shutdown. The registry also rejects
-scrapes with HTTP 500 until reset or the next successful launch, rather than
-serving partial totals as a successful snapshot.
+collection error fails the run and initiates shutdown. Once accepted, that error
+remains a run failure even if the process exits concurrently and final collection
+succeeds. The registry also rejects scrapes with HTTP 500 until reset or the next
+successful launch, rather than serving partial totals as a successful snapshot.
 
 After process/descendant cleanup, the SDK cancels and joins live callbacks and
 readers, then invokes `CustomIngestMetrics` once more with a fresh
 `FinalMetricsTimeout` context (two seconds). Drain final output within that
-deadline; final errors fail the run. Live and final collection calls never
-overlap, and the workspace is not released until final collection completes.
+deadline; final errors or an expired deadline fail the run even after a
+coordinator-requested stop, including scheduled completion. Live and final
+collection calls never overlap, and the workspace is not released until final
+collection completes.
 
 Retain completed-run values for final scrapes. When clearing parser/admission
 state in `BeforeStart`, call `registry.Reset()` under the adapter's state lock.
