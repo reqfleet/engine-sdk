@@ -51,19 +51,20 @@ a new engine with Reqfleet.
 
 ## Using the SDK
 
-Add the latest published release, [v0.5.0](https://github.com/reqfleet/engine-sdk/releases/tag/v0.5.0),
-to an adapter's Go module:
+Check the [latest release notes](https://github.com/reqfleet/engine-sdk/releases/latest)
+for the current version and changes. Add the SDK to an adapter's Go module:
 
 ```sh
-go get github.com/reqfleet/engine-sdk@v0.5.0
+go get github.com/reqfleet/engine-sdk@latest
 ```
 
-Use the Go toolchain required by the release's
-[go.mod](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/go.mod).
 Pin the SDK version and review compatibility when upgrading: the Go API is pre-1.0.
+Read the linked documentation at the source tag matching your pinned release;
+the default branch may contain unreleased changes. Use the Go toolchain required
+by that release's [go.mod](go.mod).
 
 For adapter development, start with the
-[v0.5.0 adapter guide](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/AGENTS.md).
+[adapter guide](AGENTS.md).
 It covers the public packages, callback lifecycle, configuration, workspace
 ownership, metrics integration, and verification workflow, with links to the
 detailed contracts.
@@ -71,7 +72,7 @@ detailed contracts.
 To resolve SDK-owned deployment settings before initializing adapter components,
 use `agent.LoadAgentServerOptions`, then pass the resolved options to
 `agent.NewAgentServer`. See the [environment precedence and native-exporter
-example](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/AGENTS.md#resolve-deployment-options-before-construction).
+example](AGENTS.md#resolve-deployment-options-before-construction).
 
 Adapters with an in-process normalized exporter can pass its `http.Handler` as
 `AgentServerOptions.MetricsHandler`, with
@@ -79,8 +80,8 @@ Adapters with an in-process normalized exporter can pass its `http.Handler` as
 through the existing authenticated `/metrics` route; no extra listener or
 loopback proxy is needed. `ResultFile` may still name workload output without
 `MetricParser`. The adapter retains parsing and exporter-state ownership; see the
-[example](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/AGENTS.md#resolve-deployment-options-before-construction) and
-[configuration contract](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/agent/metrics.md#integration-modes).
+[example](AGENTS.md#resolve-deployment-options-before-construction) and
+[configuration contract](agent/metrics.md#integration-modes).
 
 ## Coordinator backward compatibility
 
@@ -199,7 +200,7 @@ explicitly opts into last-resort SDK folding, with per-scrape buffering and pars
 cost, text/identity negotiation, a 16 MiB snapshot bound, and validation for safe
 aggregation. Result-file ingestion always enforces the SDK distinct-label budget.
 Both enforcement paths permit N named labels plus one overflow label per agent/run.
-See the [v0.5.0 metrics contract](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/agent/metrics.md) for responsibilities and fallback
+See the [metrics contract](agent/metrics.md) for responsibilities and fallback
 semantics. Registration, invocation, upload safeguards, mandatory content
 preparation, and tier policy belong to the host.
 
