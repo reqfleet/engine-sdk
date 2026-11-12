@@ -196,6 +196,95 @@ func TestMetricsRegistryIndependentUpdates(t *testing.T) {
 	})
 }
 
+func TestMetricsRegistryIndependentLatencyAndStatus(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		record func(*MetricsRegistry, ShibuyaMetric)
+		family string
+	}{
+		{"latency", (*MetricsRegistry).ObserveLatency, "shibuya_latency_label_milliseconds"},
+		{"status", (*MetricsRegistry).RecordStatus, "shibuya_status_counter"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, state := range []string{"empty", "populated", "reset"} {
+				t.Run(state, func(t *testing.T) {
+					registry := NewMetricsRegistry()
+					metric := ShibuyaMetric{
+						CollectionID: "collection",
+						PlanID:       "plan",
+						RunID:        "run",
+						EngineID:     "engine",
+						Zone:         "zone",
+						Label:        "llm_resp",
+						Status:       "200",
+						Latency:      200,
+						EgressBytes:  128,
+						Threads:      4,
+					}
+					if state != "empty" {
+						registry.ObserveRequest(metric)
+						registry.AddReceivedBytes(metric)
+						registry.SetConcurrency(metric)
+					}
+					if state == "reset" {
+						test.record(registry, metric)
+						registry.Reset()
+						require.Empty(t, gatherCanonicalMetrics(t, registry))
+					}
+					before := gatherCanonicalMetrics(t, registry)
+
+					// Unrelated values must be ignored, not recorded or used as
+					// presence flags. A zero latency is still an observation.
+					metric.EgressBytes = 999
+					metric.Threads = 99
+					if test.name == "latency" {
+						metric.Status = ""
+					}
+					metric.Latency = 25
+					test.record(registry, metric)
+					metric.Latency = 0
+					test.record(registry, metric)
+
+					after := gatherCanonicalMetrics(t, registry)
+					require.Contains(t, after, test.family)
+					require.Len(t, after[test.family].Metric, 1)
+					recorded := after[test.family].Metric[0]
+					wantCount := uint64(2)
+					wantSum := float64(25)
+					if state == "populated" {
+						wantCount++
+						wantSum += 200
+					}
+					wantLabels := map[string]string{
+						"collection_id": "collection",
+						"plan_id":       "plan",
+						"run_id":        "run",
+						"engine_no":     "engine",
+						"zone":          "zone",
+						"label":         "llm_resp",
+					}
+					if test.name == "latency" {
+						assert.Equal(t, wantCount, recorded.GetHistogram().GetSampleCount())
+						assert.Equal(t, wantSum, recorded.GetHistogram().GetSampleSum())
+					} else {
+						assert.Equal(t, float64(wantCount), recorded.GetCounter().GetValue())
+						wantLabels["status"] = "200"
+					}
+					labels := make(map[string]string, len(recorded.Label))
+					for _, label := range recorded.Label {
+						labels[label.GetName()] = label.GetValue()
+					}
+					assert.Equal(t, wantLabels, labels)
+
+					delete(before, test.family)
+					delete(after, test.family)
+					assert.Equal(t, before, after, "unrelated families must remain unchanged")
+				})
+			}
+		})
+	}
+}
+
 func TestMetricsRegistryInstancesAreIndependent(t *testing.T) {
 	first := NewMetricsRegistry()
 	second := NewMetricsRegistry()

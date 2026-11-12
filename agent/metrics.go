@@ -102,6 +102,21 @@ func NewMetricsRegistry() *MetricsRegistry {
 	return r
 }
 
+// ObserveLatency records only metric.Latency, in milliseconds. Like ObserveRequest,
+// it uses the ordinary latency histogram even when the label is "llm_resp".
+func (r *MetricsRegistry) ObserveLatency(metric ShibuyaMetric) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	r.observeLatency(metric, r.labelLatencyHistogram)
+}
+
+// RecordStatus increments only the counter for metric.Status by one.
+func (r *MetricsRegistry) RecordStatus(metric ShibuyaMetric) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	r.recordStatus(metric)
+}
+
 // ObserveRequest records only the request's latency and status. Every request
 // uses the ordinary latency histogram, even when its label is "llm_resp".
 func (r *MetricsRegistry) ObserveRequest(metric ShibuyaMetric) {
@@ -139,7 +154,15 @@ func (r *MetricsRegistry) RecordEvent(metric ShibuyaMetric) {
 // Recording helpers use the caller's lock so RecordEvent can update every
 // collector together with respect to Reset, without nested locking.
 func (r *MetricsRegistry) observeRequest(sm ShibuyaMetric, histogram *prometheus.HistogramVec) {
+	r.observeLatency(sm, histogram)
+	r.recordStatus(sm)
+}
+
+func (r *MetricsRegistry) observeLatency(sm ShibuyaMetric, histogram *prometheus.HistogramVec) {
 	histogram.WithLabelValues(sm.CollectionID, sm.Label, sm.RunID, sm.EngineID, sm.PlanID, sm.Zone).Observe(sm.Latency)
+}
+
+func (r *MetricsRegistry) recordStatus(sm ShibuyaMetric) {
 	r.statusCounter.WithLabelValues(sm.CollectionID, sm.PlanID, sm.RunID, sm.EngineID, sm.Label, sm.Zone, sm.Status).Inc()
 }
 

@@ -79,11 +79,13 @@
 // See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
 //
-// MetricsRegistry owns per-agent collectors. ObserveRequest, AddReceivedBytes,
-// and SetConcurrency update independent samples; RecordEvent handles complete
-// events. Direct callers supply identity from RunContext and validate/admit names
-// before recording. There are no global collectors. Reset clears all series;
-// synchronize it with adapter state at the next BeforeStart.
+// MetricsRegistry owns per-agent collectors. ObserveLatency, RecordStatus,
+// AddReceivedBytes, and SetConcurrency update independent measurements.
+// ObserveRequest records latency and status together; RecordEvent handles complete
+// events. Omit unavailable measurements rather than fabricating zero values.
+// Direct callers supply identity from RunContext and validate/admit names before
+// recording. There are no global collectors. Reset clears all series; synchronize
+// it with adapter state at the next BeforeStart.
 // CustomIngestMetrics lets adapters normalize independent engine samples that
 // do not fit MetricParser's complete-request event model. The SDK runs it after
 // launch and every 250ms, separately from Observe and Progress.

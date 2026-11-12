@@ -79,12 +79,22 @@ a registry between servers or register duplicate families.
 
 Recording methods take `ShibuyaMetric` values with identity from `RunContext`:
 
+- `ObserveLatency` records only `Latency`, in milliseconds, in the ordinary
+  request histogram.
+- `RecordStatus` increments only the supplied `Status` counter by one.
 - `ObserveRequest` records ordinary latency and one status count only.
 - `AddReceivedBytes` adds only `EgressBytes`, under the supplied label.
 - `SetConcurrency` sets only `Threads`.
 - `RecordEvent` records all four values for a complete per-request event. It
   preserves the parser's case-insensitive `llm_resp` histogram routing;
-  `ObserveRequest` always records ordinary request latency.
+  `ObserveLatency` and `ObserveRequest` always record ordinary request latency,
+  including when the label is `llm_resp`.
+
+Use the operation matching the measurements actually present in the source.
+Latency-only and status-only samples must not use `ObserveRequest` or
+`RecordEvent`: zero-valued fields do not mean a measurement is absent.
+`ObserveLatency` records a supplied zero latency; `RecordStatus` does not observe
+any latency. Neither operation changes received bytes or concurrency.
 
 The adapter owns source validation and request-name admission before calling
 these methods. Use `LabelIsValid` and `metricschema.AdmitRequestName` with the
