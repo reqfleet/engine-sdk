@@ -176,7 +176,7 @@ func TestRuntimeBasicRequiresPositiveRequestMeasurements(t *testing.T) {
 		contract.Basic.Complete.Settings = settings
 		assertDefault := contract.Basic.AssertMetrics
 		contract.Basic.AssertMetrics = func(t *testing.T, runtime *Runtime, id string) MetricsSnapshot {
-			if id != "8901" {
+			if id != "8901" && mode != "latency" {
 				return assertDefault(t, runtime, id)
 			}
 			body, err := os.ReadFile(filepath.Join(runtime.Root, "test-result", id+".requests"))
@@ -217,8 +217,21 @@ func TestRuntimeBasicRequiresPositiveRequestMeasurements(t *testing.T) {
 			fmt.Printf("validated request measurements=%s\n", mode)
 			return snapshot
 		}
-		runtime := startRuntime(t, contract)
-		runBasic(t, runtime, contract.Basic)
+		if mode == "latency" {
+			contract.Basic.Reuse.Settings = settings
+			contract.Budgets = []BudgetScenario{{
+				Name:            "latency-only",
+				LabelLimit:      1,
+				Fixture:         contract.Basic.Reuse,
+				MinimumRequests: 1,
+				RequestLabels:   []string{"fixture"},
+				ByteLabels:      []string{"aggregate"},
+			}}
+			Run(t, contract)
+		} else {
+			runtime := startRuntime(t, contract)
+			runBasic(t, runtime, contract.Basic)
+		}
 		fmt.Println("completed lifecycle with independent request measurements")
 		return
 	}
@@ -288,6 +301,59 @@ func TestRuntimeAwaitRequestsRecoversFromTransientScrapeFailures(t *testing.T) {
 	runtime.AwaitRequests(t, "8902", 1)
 	require.GreaterOrEqual(t, scrapes.Load(), int64(5), "previous-run counts must not satisfy the current run")
 	contract.Basic.AssertMetrics(t, runtime, "8902")
+}
+
+func TestRuntimeAwaitRequestsUsesIndependentMeasurements(t *testing.T) {
+	identity := func(id string) string {
+		return strings.Replace(metricTestIdentity, `run_id="current"`, fmt.Sprintf("run_id=%q", id), 1)
+	}
+	latency := func(id string, observations ...float64) string {
+		return latencyMetricFixture("shibuya_latency_label_milliseconds", identity(id), "fixture", observations)
+	}
+	status := func(id string, count uint64) string {
+		return fmt.Sprintf("# TYPE shibuya_status_counter counter\nshibuya_status_counter{%s,label=\"fixture\",status=\"200\"} %d\n", identity(id), count)
+	}
+	one := latency("current", 1)
+	two := latency("current", 1, 2)
+	llm := latencyMetricFixture("shibuya_latency_llm_resp_milliseconds", identity("current"), "llm_resp", []float64{100, 200, 300})
+	cases := map[string][]string{
+		"latency only":                     {one, two},
+		"do not add status and latency":    {status("current", 1) + one, status("current", 2) + two},
+		"zero status takes precedence":     {status("current", 0) + two, status("current", 2) + two},
+		"retained status permits fallback": {status("retired", 100) + one, status("retired", 100) + two},
+		"retained latency does not count":  {latency("retired", 1, 2, 3), two},
+		"LLM observations do not count":    {llm, two},
+		"raw duplicate components rejected": {
+			two + fmt.Sprintf("shibuya_latency_label_milliseconds_count{%s,label=\"fixture\"} 2\n", identity("current")),
+			two,
+		},
+	}
+	for _, syntax := range []string{"first", "middle", "last", "mixed"} {
+		// Group TYPE declarations before the samples so the histogram follows
+		// a gauge, rather than inheriting histogram state from its own TYPE.
+		bracedOne := strings.Replace(metricNameSyntaxFixture(one, syntax), " histogram\n", " histogram\n# TYPE unrelated gauge\nunrelated 0\n", 1)
+		bracedTwo := strings.Replace(metricNameSyntaxFixture(two, syntax), " histogram\n", " histogram\n# TYPE unrelated gauge\nunrelated 0\n", 1)
+		cases["braced names "+syntax] = []string{bracedOne, bracedTwo}
+	}
+	for name, samples := range cases {
+		t.Run(name, func(t *testing.T) {
+			var scrapes atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				index := min(scrapes.Add(1)-1, int64(len(samples)-1))
+				_, _ = io.WriteString(w, samples[index])
+			}))
+			defer server.Close()
+			client := server.Client()
+			client.Transport = runtimeTransportFunc(func(request *http.Request) (*http.Response, error) {
+				redirected := request.Clone(request.Context())
+				redirected.URL.Host = strings.TrimPrefix(server.URL, "http://")
+				return http.DefaultTransport.RoundTrip(redirected)
+			})
+			runtime := &Runtime{Client: client}
+			runtime.AwaitRequests(t, "current", 2)
+			require.Equal(t, int64(len(samples)), scrapes.Load(), "polling must wait for this run's request threshold")
+		})
+	}
 }
 
 func TestRuntimeScrapeFailuresRemainStrictAndBounded(t *testing.T) {

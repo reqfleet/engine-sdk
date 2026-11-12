@@ -116,13 +116,9 @@ func validateMetrics(exposition string, expected MetricsExpectation) (MetricsSna
 		Requests: make(map[string]RequestSnapshot),
 		Bytes:    make(map[string]float64),
 	}
-	if err := validateRawMetricSamples(exposition); err != nil {
-		return snapshot, err
-	}
-	parser := expfmt.NewTextParser(model.UTF8Validation)
-	families, err := parser.TextToMetricFamilies(strings.NewReader(normalizeMetricNames(exposition)))
+	families, err := parseMetricFamilies(exposition)
 	if err != nil {
-		return snapshot, fmt.Errorf("parse exposition: %w", err)
+		return snapshot, err
 	}
 	identity := map[string]string{
 		metricschema.LabelCollectionID: expected.Identity.CollectionID,
@@ -306,6 +302,20 @@ func validateMetrics(exposition string, expected MetricsExpectation) (MetricsSna
 		}
 	}
 	return snapshot, nil
+}
+
+// parseMetricFamilies preserves raw validation before normalizing name syntax.
+// Both final assertions and live polling must use the same parser path.
+func parseMetricFamilies(exposition string) (map[string]*dto.MetricFamily, error) {
+	if err := validateRawMetricSamples(exposition); err != nil {
+		return nil, err
+	}
+	parser := expfmt.NewTextParser(model.UTF8Validation)
+	families, err := parser.TextToMetricFamilies(strings.NewReader(normalizeMetricNames(exposition)))
+	if err != nil {
+		return nil, fmt.Errorf("parse exposition: %w", err)
+	}
+	return families, nil
 }
 
 // normalizeMetricNames moves a standalone in-braces name ahead of its labels.

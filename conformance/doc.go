@@ -41,9 +41,13 @@
 // and liveness checks for additional engine-specific scenarios. Payload and
 // DataArtifactPath construct commands and artifact paths with harness identities.
 // Scenarios and runtime calls must be serialized; do not use parallel tests.
-// AwaitRequests tolerates transient scrape failures only while waiting for the
-// requested run's measurements within Wait. Explicit Scrape calls and final
-// metric assertions still require a successful response.
+// AwaitRequests uses the same raw validation and metric-name normalization as
+// AssertMetrics. It sums status counters for the requested run when present,
+// including zero-valued series. Otherwise it uses that run's ordinary request
+// latency histogram counts. It never adds both families or counts LLM response
+// observations. Retained series from other runs do not affect this choice.
+// Transport, HTTP, and parsing failures are retried only within Wait. Explicit
+// Scrape calls and final metric assertions still require a successful response.
 // Send tracks cleanup by the command addressed to the harness plan, not the
 // envelope verb. BlockedFile chooses a synthetic test/dependency artifact name
 // that does not shadow supplied artifacts.

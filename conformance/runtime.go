@@ -14,13 +14,10 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/model"
 	"github.com/reqfleet/engine-sdk/metricschema"
 	"github.com/reqfleet/engine-sdk/protocol"
 	"github.com/stretchr/testify/require"
@@ -535,7 +532,9 @@ func (r *Runtime) AssertAlive(t *testing.T) {
 	}
 }
 
-// AwaitRequests waits for real normalized request counts for this run only.
+// AwaitRequests waits for this run's status count, or its ordinary request-latency
+// count when no status series exists for the run. The two families are never added
+// together; optional LLM response observations are not request-count evidence.
 func (r *Runtime) AwaitRequests(t *testing.T, id string, minimum uint64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), proofWait)
@@ -551,21 +550,9 @@ func (r *Runtime) AwaitRequests(t *testing.T, id string, minimum uint64) {
 		}
 		lastErr = err
 		if err == nil {
-			parser := expfmt.NewTextParser(model.UTF8Validation)
-			families, err := parser.TextToMetricFamilies(strings.NewReader(body))
-			lastErr = err
-			count = 0
-			if err == nil && families[metricschema.StatusCounter] != nil {
-				for _, metric := range families[metricschema.StatusCounter].Metric {
-					for _, label := range metric.Label {
-						if label.GetName() == metricschema.LabelRunID && label.GetValue() == id {
-							count += metric.GetCounter().GetValue()
-						}
-					}
-				}
-				if count >= float64(minimum) {
-					return
-				}
+			count, lastErr = countRunRequests(body, id)
+			if lastErr == nil && count >= float64(minimum) {
+				return
 			}
 		}
 		select {
@@ -574,4 +561,33 @@ func (r *Runtime) AwaitRequests(t *testing.T, id string, minimum uint64) {
 		}
 	}
 	t.Fatalf("run %s must generate at least %d real requests; observed %g; last scrape error: %v", id, minimum, count, lastErr)
+}
+
+func countRunRequests(exposition, id string) (float64, error) {
+	families, err := parseMetricFamilies(exposition)
+	if err != nil {
+		return 0, err
+	}
+	for _, name := range [...]string{metricschema.StatusCounter, metricschema.RequestLatency} {
+		var count float64
+		found := false
+		for _, metric := range families[name].GetMetric() {
+			for _, label := range metric.Label {
+				if label.GetName() != metricschema.LabelRunID || label.GetValue() != id {
+					continue
+				}
+				found = true
+				if name == metricschema.StatusCounter {
+					count += metric.GetCounter().GetValue()
+				} else {
+					count += float64(metric.GetHistogram().GetSampleCount())
+				}
+				break
+			}
+		}
+		if found {
+			return count, nil
+		}
+	}
+	return 0, nil
 }
