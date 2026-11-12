@@ -29,6 +29,9 @@ func AdmitRequestLabel(label string, admitted map[string]string, limit int, over
 	if len(admitted) >= limit {
 		return overflowLabel
 	}
+	// CSV fields can share an entire record's backing allocation. Clone only
+	// newly admitted labels, then retain the clone as the value so later lookups
+	// reuse it instead of returning a field backed by another CSV record.
 	label = strings.Clone(label)
 	admitted[label] = label
 	return label
