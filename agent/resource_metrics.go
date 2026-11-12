@@ -1,8 +1,8 @@
 package agent
 
 import (
-	"net/http"
-	"sync"
+	"context"
+	"time"
 
 	"github.com/reqfleet/engine-sdk/resources"
 )
@@ -13,7 +13,6 @@ type resourceSampler interface {
 }
 
 type resourceMetrics struct {
-	mu      sync.Mutex
 	sampler resourceSampler
 	runID   string
 	meta    EngineMeta
@@ -23,7 +22,7 @@ func newResourceMetrics() resourceMetrics {
 	return resourceMetrics{sampler: &resources.Sampler{}}
 }
 
-// reset runs under the registry's exclusive lock, after in-flight scrapes finish.
+// reset runs under the registry's exclusive lock, after in-flight sampling finishes.
 func (r *resourceMetrics) reset() {
 	r.runID = ""
 	r.meta = EngineMeta{}
@@ -35,9 +34,10 @@ func (m *MetricsRegistry) startResourceRun(meta EngineMeta, runID string) {
 	defer m.mu.Unlock()
 	m.resources.reset()
 	m.resources.meta, m.resources.runID = meta, runID
+	m.collectionErr = nil
 }
 
-// publishResourceMetrics runs under the registry lock and resource sampling lock.
+// publishResourceMetrics runs under the registry read lock.
 func (m *MetricsRegistry) publishResourceMetrics(meta EngineMeta, runID string, sample resources.Sample, ok bool) {
 	if !ok {
 		m.cpuGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
@@ -48,30 +48,11 @@ func (m *MetricsRegistry) publishResourceMetrics(meta EngineMeta, runID string, 
 	m.memGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(float64(sample.MemoryBytes))
 }
 
-// resourceHandler holds the run identity through gathering. The inner handler
-// must gather the private Prometheus registry directly, not re-lock via Gather.
-func (m *MetricsRegistry) resourceHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.mu.RLock()
-		defer m.mu.RUnlock()
-		if err := r.Context().Err(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := m.sampleResources(); err != nil {
-			http.Error(w, "container resources: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// sampleResources is called with the registry read lock held. The separate lock
-// serializes concurrent scrapes without blocking request-event recording.
+// sampleResources has one live caller per run; the final call follows worker shutdown.
 func (m *MetricsRegistry) sampleResources() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	r := &m.resources
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.runID == "" {
 		return nil
 	}
@@ -81,4 +62,24 @@ func (m *MetricsRegistry) sampleResources() error {
 	}
 	m.publishResourceMetrics(r.meta, r.runID, sample, ok)
 	return nil
+}
+
+func (as *AgentServer) sampleOwnMetrics() {
+	if err := as.metrics.sampleResources(); err != nil {
+		as.logger.WithError(err).Warn("Container resource metrics are unavailable")
+	}
+}
+
+func (as *AgentServer) reportOwnMetrics(ctx context.Context, interval time.Duration) {
+	as.sampleOwnMetrics()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			as.sampleOwnMetrics()
+		}
+	}
 }

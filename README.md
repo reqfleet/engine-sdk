@@ -51,38 +51,27 @@ a new engine with Reqfleet.
 
 ## Using the SDK
 
-Add the SDK to an adapter's Go module:
+Add the latest published release, [v0.5.0](https://github.com/reqfleet/engine-sdk/releases/tag/v0.5.0),
+to an adapter's Go module:
 
 ```sh
-go get github.com/reqfleet/engine-sdk@v0.1.1
+go get github.com/reqfleet/engine-sdk@v0.5.0
 ```
 
-Use the Go toolchain required by `go.mod` for the SDK revision you build; this
-checkout declares its requirement in [go.mod](go.mod). Pin the SDK version and
-review compatibility when upgrading: the Go API is pre-1.0.
+Use the Go toolchain required by the release's
+[go.mod](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/go.mod).
+Pin the SDK version and review compatibility when upgrading: the Go API is pre-1.0.
 
-For adapter development, start with [AGENTS.md](AGENTS.md). It covers the public
-packages, callback lifecycle, configuration, workspace ownership, metrics
-integration, and verification workflow, with links to the detailed contracts.
+For adapter development, start with the
+[v0.5.0 adapter guide](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/AGENTS.md).
+It covers the public packages, callback lifecycle, configuration, workspace
+ownership, metrics integration, and verification workflow, with links to the
+detailed contracts.
 
 To resolve SDK-owned deployment settings before initializing adapter components,
 use `agent.LoadAgentServerOptions`, then pass the resolved options to
 `agent.NewAgentServer`. See the [environment precedence and native-exporter
-example](AGENTS.md#resolve-deployment-options-before-construction).
-This API is unreleased and is not included in `v0.3.0`; adapters must pin a
-published release containing it before removing their local environment parsers.
-
-Adapters that ingest independent samples can update SDK-owned collectors through
-`agent.MetricsRegistry`: request latency/status, received bytes, and concurrency
-have separate recording methods. Supply the registry through `AgentServerOptions`
-and use `WrapMetricsHandler` to drain output and synchronize scrapes. The SDK owns
-metric definitions, HTTP exposition, and container resource sampling; no
-adapter-owned collectors or resource reporter are needed. See the
-[registry contract](agent/metrics.md#sdk-owned-registry).
-
-This unreleased API replaces `ShibuyaMetric.ToPrometheus()` with
-`MetricsRegistry.RecordEvent`. Existing `MetricParser` callbacks and native
-`MetricsURL` integrations remain supported without adapter changes.
+example](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/AGENTS.md#resolve-deployment-options-before-construction).
 
 Adapters with an in-process normalized exporter can pass its `http.Handler` as
 `AgentServerOptions.MetricsHandler`, with
@@ -90,19 +79,8 @@ Adapters with an in-process normalized exporter can pass its `http.Handler` as
 through the existing authenticated `/metrics` route; no extra listener or
 loopback proxy is needed. `ResultFile` may still name workload output without
 `MetricParser`. The adapter retains parsing and exporter-state ownership; see the
-[example](AGENTS.md#resolve-deployment-options-before-construction) and
-[configuration contract](agent/metrics.md#integration-modes).
-`MetricsHandler` is also unreleased and absent from `v0.3.0`; publish and pin a
-release containing it before removing an adapter's listener/`MetricsURL` wiring.
-
-Custom exporters can reuse the public
-[`resources.Sampler`](resources/sampler.go) to sample Linux cgroup CPU
-cores and memory bytes without importing the agent runtime or Prometheus. The SDK
-runtime uses the same sampler, including elapsed-time calculation, run reset and
-error semantics. See the
-[resource metrics contract](agent/metrics.md#runtime-resource-metrics) for units
-and exporter ownership. The sampler API is unreleased; pin a development revision
-or a published release containing it before importing it.
+[example](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/AGENTS.md#resolve-deployment-options-before-construction) and
+[configuration contract](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/agent/metrics.md#integration-modes).
 
 ## Coordinator backward compatibility
 
@@ -128,12 +106,10 @@ Deployed agents require Linux containers, including writable workspace paths and
 cgroup CPU/memory files. Unix workload execution uses process groups so stopping
 a run also terminates its descendants.
 
-This checkout also supports Windows `amd64` and `arm64` builds for clients that
+The SDK also supports Windows `amd64` and `arm64` builds for clients that
 import SDK types and handlers. It does not support Windows agent execution:
 `AgentServer.Run()` returns an error matching `errors.ErrUnsupported` before
-starting workers, coordinator subscriptions, or HTTP listeners. The Windows
-compatibility fix is unreleased; consumers pinned to `v0.1.1` need a release
-containing this fix.
+starting workers, coordinator subscriptions, or HTTP listeners.
 
 The PR workflow builds both Windows architectures and runs the unsupported
 execution contract tests on a Windows runner. Linux retains the full SDK race
@@ -158,11 +134,6 @@ The [`validation`](validation/doc.go) package defines a public Go contract for
 optional, best-effort upload checks, separate from the agent runtime. Validation
 and label counting provide early user feedback; neither is a runtime-safety
 capability.
-
-The `validation` package and [`jsonvalidator`](examples/jsonvalidator) example
-are unreleased and planned for `v0.2.0`; the `v0.1.1` installation above does not
-include them. Until that release is available, use a pinned development revision
-containing this contract.
 
 Implement `validation.Validator` with the signature:
 
@@ -228,7 +199,7 @@ explicitly opts into last-resort SDK folding, with per-scrape buffering and pars
 cost, text/identity negotiation, a 16 MiB snapshot bound, and validation for safe
 aggregation. Result-file ingestion always enforces the SDK distinct-label budget.
 Both enforcement paths permit N named labels plus one overflow label per agent/run.
-See the [metrics contract](agent/metrics.md) for responsibilities and fallback
+See the [v0.5.0 metrics contract](https://github.com/reqfleet/engine-sdk/blob/v0.5.0/agent/metrics.md) for responsibilities and fallback
 semantics. Registration, invocation, upload safeguards, mandatory content
 preparation, and tier policy belong to the host.
 

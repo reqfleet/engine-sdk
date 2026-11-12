@@ -94,6 +94,12 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	readers.Go(func() { as.streamToLogger(stderr, "stderr") })
 	monitorCtx, stopMonitor := context.WithCancel(run.ctx)
 	var monitors sync.WaitGroup
+	if as.metrics != nil {
+		monitors.Go(func() { as.reportOwnMetrics(monitorCtx, 5*time.Second) })
+	}
+	if as.options.CollectMetrics != nil {
+		monitors.Go(func() { as.reportMetrics(monitorCtx, run) })
+	}
 	if as.options.Observe != nil {
 		monitors.Go(func() { as.observeRun(monitorCtx, run) })
 	}
@@ -120,6 +126,12 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	stopMonitor()
 	monitors.Wait()
 	readers.Wait()
+	if as.options.CollectMetrics != nil {
+		waitErr = errors.Join(waitErr, as.collectFinalMetrics(run))
+	}
+	if as.metrics != nil {
+		as.sampleOwnMetrics()
+	}
 	if as.options.Progress != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), FinalProgressTimeout)
 		as.collectProgress(ctx, run)

@@ -14,15 +14,15 @@ collectors and event recording remain in `agent`.
 | Mode | `AgentServerOptions` | Ownership |
 | --- | --- | --- |
 | Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsHandler` nil, `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
-| Direct SDK registry updates | Optional `MetricsRegistry: agent.NewMetricsRegistry()` and `WrapMetricsHandler`; leave `MetricParser`, `MetricsHandler`, and all native options unset | The adapter validates and admits engine samples, then updates SDK-defined collectors. The SDK serves the registry and samples resources. |
+| Direct SDK registry updates | Optional `MetricsRegistry: agent.NewMetricsRegistry()` and `CollectMetrics`; leave `MetricParser`, `MetricsHandler`, and all native options unset | The adapter validates and admits engine samples, then updates SDK-defined collectors. The SDK schedules collection, samples resources, and serves stored values. |
 | In-process normalized handler | Non-nil `MetricsHandler`, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser`, empty `MetricsURL` | The adapter owns normalization, label limits, and exporter state; the SDK serves the handler directly behind its existing authentication. Folding options are not supported. |
 | Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` and `MetricsHandler` | The engine enforces its configured label limit and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
 | Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
 
-With `WrapMetricsHandler`, `MetricsHandler`, or `MetricsURL`, `ResultFile` may
+With `CollectMetrics`, `MetricsHandler`, or `MetricsURL`, `ResultFile` may
 name ordinary workload output, such as k6 CSV. The SDK does not tail it or require
 a parser. Otherwise, `ResultFile` and `MetricParser` must be paired.
-`WrapMetricsHandler`, `MetricsHandler`, `MetricsURL`, and `MetricParser` are
+`CollectMetrics`, `MetricsHandler`, `MetricsURL`, and `MetricParser` are
 mutually exclusive. An explicit `MetricsRegistry` cannot accompany a native source.
 `FoldNativeMetrics: true` and any nonempty `NativeMetricsOverflowLabel` require
 `MetricsURL`; they are rejected with a handler, result-file events, or registry only.
@@ -43,8 +43,8 @@ identify the remedy:
 - `unsupported native metrics schema %q; require shibuya-v1 from an adapter-normalized endpoint`
 - `native metrics overflow label must be others or _other_`
 - `native metrics URL must use http or https and include a host`
-- `native metrics cannot configure MetricsRegistry or WrapMetricsHandler`
-- `WrapMetricsHandler cannot configure MetricParser`
+- `native metrics cannot configure MetricsRegistry or CollectMetrics`
+- `CollectMetrics cannot configure MetricParser`
 
 Choose an integration based on both how the engine exposes metrics and the schema
 it produces. For example, an engine without native Prometheus export, such as
@@ -92,23 +92,31 @@ resolved label budget. Independent bytes or concurrency samples must not be
 passed to `RecordEvent`; doing so invents requests. Preserve aggregate byte
 attribution when the source does not identify a request.
 
-`WrapMetricsHandler func(http.Handler) http.Handler` wraps the SDK's handler
-behind bearer authentication. Drain pending engine output using the incoming
-request context, fail the response before calling the supplied handler if
-collection fails or is not ready, and hold the adapter's collection/reset lock
-through the supplied handler's `ServeHTTP`. The SDK then samples resources and
-gathers its registry. Do not write another exposition, start another listener,
-or implement resource collection in the wrapper. Concurrent recording is safe,
-but gathering is not a transaction across independent updates; adapters needing
-a coherent CSV snapshot must retain their lock through the scrape.
+`CollectMetrics func(context.Context, RunContext) error` lets the SDK schedule
+engine-output collection independently of scrapes. It runs after launch and every
+250 milliseconds, on its own loop rather than the readiness/progress loops.
+Honor its context and synchronize adapter state with `Observe`. An uncanceled
+collection error fails the run and initiates shutdown. The registry also rejects
+scrapes with HTTP 500 until reset or the next successful launch, rather than
+serving partial totals as a successful snapshot.
 
-Retain completed-run values and drain final output on post-exit scrapes. When an
-adapter clears its run-local parser/admission state in `BeforeStart`, call
-`registry.Reset()` under the same adapter lock. Reset clears all series and
-resource identity/baseline; the SDK assigns resource identity on successful
+After process/descendant cleanup, the SDK cancels and joins live callbacks and
+readers, then invokes `CollectMetrics` once more with a fresh
+`FinalMetricsTimeout` context (two seconds). Drain final output within that
+deadline; final errors fail the run. Live and final collection calls never
+overlap, and the workspace is not released until final collection completes.
+
+Retain completed-run values for final scrapes. When clearing parser/admission
+state in `BeforeStart`, call `registry.Reset()` under the adapter's state lock.
+Reset clears all series, collection errors, and resource identity/baseline.
+The SDK assigns resource identity and clears collection errors on successful
 launch. Without explicit Reset, prior-run series remain separately labelled.
-Never reset during an active run. `Gather` reads current values without sampling;
-resource collection belongs to the SDK HTTP route.
+Never reset during an active run. Recording and gathering are concurrency-safe,
+but a scrape is not a transaction across independent metric updates.
+
+HTTP only gathers the current registry: it does not read files, sample resources,
+or invoke callbacks. Before any samples, it may return an empty exposition;
+workload readiness belongs to `/progress`, not the metrics response status.
 
 This replaces the process-global `ShibuyaMetric.ToPrometheus()` API with
 `registry.RecordEvent(metric)`. JMeter/Locust-style `MetricParser` callbacks
@@ -403,13 +411,14 @@ omitted. Existing error charts classify non-2xx/non-3xx statuses as errors.
 
 ## Runtime resource metrics
 
-The SDK collects container CPU and memory on each SDK-registry HTTP scrape,
-including result-file, direct-update, and registry-only modes. It exposes
-`shibuya_cpu_gauge` (CPU cores) and `shibuya_mem_gauge` (bytes). Sampling begins
-after successful launch and retains that run's identity for final scrapes,
-including runs that complete before their first scrape. There is no background
-resource reporter. Native `MetricsURL` and `MetricsHandler` modes perform no SDK
-resource reads; their producers supply the complete exposition without a merge.
+The SDK collects container CPU and memory in a background loop for result-file,
+direct-update, and registry-only modes. It samples immediately after launch,
+every five seconds, and once after joining live monitors at run termination.
+It exposes `shibuya_cpu_gauge` (CPU cores) and `shibuya_mem_gauge` (bytes).
+The loop stops before workspace reuse; completed-run values remain available
+without further reads. Short runs still get an initial and a final attempt.
+Native `MetricsURL` and `MetricsHandler` modes perform no SDK resource reads;
+their producers supply the complete exposition without a merge.
 
 The runtime and adapter-owned exporters share a synchronous resource sampler
 from `github.com/reqfleet/engine-sdk/resources`. Sampling policy is separate from
@@ -459,14 +468,14 @@ these rules:
 An unavailable sample (`ok=false`, no error) is not a zero-usage measurement.
 Omit both resource series, including previous values after a counter decrease;
 do not present stale values as a new sample. Always check the error before updating
-any gauges. An SDK resource read error fails the entire scrape with HTTP 500,
-without publishing partial measurements, serving stale exposition, or terminating
-the agent. The next scrape can recover using the last successful baseline.
+any gauges. A resource read error logs a warning and skips that update; last-good
+values remain unchanged. It does not fail scrapes or terminate the workload.
+The next sampling attempt can recover using the last successful baseline.
 
 `Sample` and `Reset` are synchronized; do not copy a sampler after first use.
 The sampler starts no workers and owns no Prometheus collectors. The SDK owns
-sampling and serialization of resource identity, reset, publication, and gathering
-for its registry. Standalone native exporters own those responsibilities when
+its background sampling loop and serializes run identity, reset, and publication
+against registry reset. Standalone native exporters own those responsibilities when
 using the sampler directly; publish available values with the canonical names
 and resource labels. SDK collection never adds resource families to a
 `MetricsHandler` or `MetricsURL` response.

@@ -72,9 +72,9 @@
 // # Metrics integration
 //
 // Adapters map result-file events with MetricParser, update a MetricsRegistry
-// directly (optionally using WrapMetricsHandler to collect before scrapes), or
+// directly (optionally using CollectMetrics for SDK-scheduled collection), or
 // declare MetricsSchemaShibuyaV1 for a normalized MetricsHandler or MetricsURL.
-// Parser, wrapper, and native sources are mutually exclusive. Registry-only
+// Parser, collection callback, and native sources are mutually exclusive. Registry-only
 // serving without ingestion does not provide complete request reporting.
 // See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
@@ -83,15 +83,18 @@
 // and SetConcurrency update independent samples; RecordEvent handles complete
 // events. Direct callers supply identity from RunContext and validate/admit names
 // before recording. There are no global collectors. Reset clears all series;
-// synchronize it with adapter state and scrapes at the next BeforeStart.
-// WrapMetricsHandler receives the SDK handler behind authentication; hold any
-// adapter collection/reset lock through its ServeHTTP after draining with the
-// incoming request context. Retain final output for post-exit scrapes.
+// synchronize it with adapter state at the next BeforeStart.
+// CollectMetrics runs after launch and every 250ms, separately from Observe and
+// Progress. Honor cancellation; the SDK joins live callbacks and processes before
+// a final call with a fresh two-second context. Collection errors fail the run
+// and registry scrapes until reset or the next launch. Retain final metrics for
+// post-exit scrapes; HTTP requests never invoke collection.
 //
-// The SDK samples CPU/memory on its registry HTTP scrapes, retaining the last
-// successful launch's identity and resetting its baseline on the next launch.
-// Resource failures return HTTP 500 rather than partial metrics or fatal exit.
-// MetricsHandler and MetricsURL never start unused SDK resource collection.
+// The SDK samples CPU/memory after launch, every five seconds, and once after
+// joining live monitors. The background worker stops at run termination and its
+// last values remain available. Resource read failures warn and skip an update,
+// without failing HTTP or the workload. MetricsHandler and MetricsURL never
+// start unused SDK resource collection.
 //
 // Adapters ingesting request samples must validate labels with
 // ShibuyaMetric.LabelIsValid before admission and discard invalid samples without

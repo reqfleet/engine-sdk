@@ -3,6 +3,8 @@
 Use this file when implementing an engine adapter or changing the SDK. Keep the
 project introduction, Reqfleet motivation, and basic architecture in
 [README.md](README.md); keep implementation workflow and constraints here.
+README describes published releases only. Keep unreleased APIs and development
+contracts here and in package documentation until they ship.
 
 ## Responsibility boundary
 
@@ -156,13 +158,13 @@ needed. An existing normalized `http.Handler` can be assigned directly to
 
 For adapters that parse engine samples themselves, prefer SDK-owned collectors:
 create `agent.NewMetricsRegistry()`, pass it to the adapter and
-`options.MetricsRegistry`, and set `options.WrapMetricsHandler` to the adapter's
-HTTP middleware. Leave `MetricParser`, `MetricsHandler`, and native options unset.
-Use the registry's independent recording methods rather than defining collectors
-or reporting CPU/memory. The wrapper drains output with the scrape context and
-holds the adapter's lock through the SDK handler. Call `registry.Reset()` with
-parser/admission reset in `BeforeStart`, under that same lock. Preserve final
-output until then. See [the recording and lifecycle contract](agent/metrics.md#sdk-owned-registry).
+`options.MetricsRegistry`, and set `options.CollectMetrics` to the adapter's
+collection callback. Leave `MetricParser`, `MetricsHandler`, and native options unset.
+Use independent recording methods rather than defining collectors or reporting
+CPU/memory. Collection runs independently of scrapes, with a final post-exit call
+before workspace reuse. Call `registry.Reset()` with parser/admission reset in
+`BeforeStart`, under the adapter state lock. See
+[the recording and lifecycle contract](agent/metrics.md#sdk-owned-registry).
 
 ## Implement an adapter
 
@@ -187,7 +189,7 @@ artifacts yourself.
   the engine-specific installation logic in your container.
 - `ResultFile`: you choose a local output name and configure the engine to write
   to `RunContext.ResultFile`. With `MetricParser`, the SDK ingests its events;
-  with `WrapMetricsHandler`, `MetricsHandler`, or `MetricsURL`, it remains ordinary workload output.
+  with `CollectMetrics`, `MetricsHandler`, or `MetricsURL`, it remains ordinary workload output.
   This is produced by the engine, not an artifact supplied by the control plane.
 
 Use filenames, not paths, for these options; the SDK uses their basenames for
@@ -232,6 +234,7 @@ points below. Their exact signatures are in [`agent/server.go`](agent/server.go)
 | `BeforeStart` | Prepare engine-specific run files after execution artifacts are staged and before command construction. |
 | `BuildCommand` | Return `agent.Command{Command, Args, Dir, Env}` describing the primary workload. Do not start or wait for that process. |
 | `Observe` | Return `protocol.ObservationPending`, `ObservationReady`, or `ObservationWorkComplete`. Use pending for a healthy engine that is not ready; an error fails the run and initiates shutdown. |
+| `CollectMetrics` | Collect engine output into the SDK registry after launch and every 250ms. Honor cancellation; a final call gets a fresh two-second context after live callbacks/processes finish. Errors fail the run and registry scrapes. Do not collect from HTTP requests. |
 | `Progress` | Return a `protocol.Progress` with a nonempty engine schema `Kind` and valid JSON `Data`. This is optional reporting, not a lifecycle signal. |
 | `Stop` | Request graceful engine shutdown using the runtime-owned `Process.PID` or the engine's control API. Honor the supplied deadline and never reap the primary process. |
 
@@ -246,10 +249,11 @@ The handoff between owners is:
 3. On the coordinator's start request, the SDK stages the test, optional config,
    and data files. With no dependency declaration, it still invokes your
    dependency reconciliation hook, then `BeforeStart` and `BuildCommand`.
-4. The SDK launches the command, streams stdout/stderr, runs observation and
-   progress monitors, and ingests result events when configured.
+4. The SDK launches the command, streams stdout/stderr, runs observation,
+   progress and optional metric-collection loops, and ingests result events when configured.
 5. On exit or stop, the SDK terminates remaining descendants, joins callbacks
-   and readers, captures final progress, and only then releases the workspace.
+   and readers, collects final metrics/resources and progress, and only then
+   releases the workspace.
 
 `Command.Command` is an executable and `Args` is its argument vector, not a shell
 command string. Set `Dir` explicitly when the engine needs a working directory.
@@ -298,12 +302,12 @@ one of these modes:
   run identity and accumulates metrics; parser errors drop the event. Never
   feed cumulative snapshots into a per-request event parser.
 - **Direct SDK registry updates:** supply a `MetricsRegistry` and optionally
-  `WrapMetricsHandler`; leave parser and native options unset. Translate validated,
+  `CollectMetrics`; leave parser and native options unset. Translate validated,
   admitted samples into `ObserveRequest`, `AddReceivedBytes`, or `SetConcurrency`.
-  `RecordEvent` is only for complete request events. The SDK defines the collectors,
-  samples resources on scrapes, and serves the registry. The wrapper owns engine
-  output draining and synchronization, not resource sampling or HTTP exposition.
-  `ResultFile` may name ordinary output when using the wrapper.
+  `RecordEvent` is only for complete request events. The SDK defines collectors,
+  runs a background resource sampler, and serves stored values. The collection
+  callback owns engine-output draining, not resource sampling or HTTP exposition.
+  `ResultFile` may name ordinary output when using the collection callback.
 - **In-process normalized handler:** set `MetricsHandler` to the adapter's
   `http.Handler` and `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`; leave
   `MetricParser` nil and `MetricsURL` empty. The SDK invokes it directly at the

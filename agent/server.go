@@ -36,6 +36,9 @@ const (
 	// FinalProgressTimeout bounds the final Progress callback's fresh context.
 	// The callback must honor cancellation.
 	FinalProgressTimeout = 2 * time.Second
+	// FinalMetricsTimeout bounds the final CollectMetrics callback's fresh context.
+	// The callback must honor cancellation.
+	FinalMetricsTimeout = 2 * time.Second
 )
 
 var STDERR = "/dev/stderr"
@@ -350,13 +353,14 @@ type AgentServerOptions struct {
 	// creates a per-server registry. It cannot be combined with native sources.
 	// Do not share one registry between servers.
 	MetricsRegistry *MetricsRegistry
-	// WrapMetricsHandler wraps the SDK registry handler behind authentication.
-	// Use it to drain engine output with the incoming context and synchronize
-	// collection, gathering, and run reset. Call the supplied handler only after
-	// collection succeeds, while retaining any adapter lock needed by Reset.
-	// It cannot be combined with MetricParser or native metrics options.
+	// CollectMetrics updates the SDK registry independently of scrapes. The SDK
+	// calls it after launch and every 250ms until shutdown, then once more with a
+	// fresh FinalMetricsTimeout context after live callbacks and processes finish.
+	// Calls never overlap; honor cancellation and finish cleanup before returning.
+	// An error fails the run and makes registry scrapes fail until Reset or the
+	// next launch. It cannot be combined with MetricParser or native metrics.
 	// ResultFile may name ordinary workload output; the SDK does not tail it.
-	WrapMetricsHandler func(http.Handler) http.Handler
+	CollectMetrics func(context.Context, RunContext) error
 	// MetricsURL proxies an external normalized endpoint; it cannot be combined
 	// with MetricsHandler or MetricParser.
 	MetricsURL string
@@ -488,12 +492,12 @@ func (as *AgentServer) validateMetricsOptions() error {
 		return fmt.Errorf("metrics label limit must be nonnegative")
 	}
 	if options.MetricsURL != "" || options.MetricsHandler != nil {
-		if options.MetricsRegistry != nil || options.WrapMetricsHandler != nil {
-			return fmt.Errorf("native metrics cannot configure MetricsRegistry or WrapMetricsHandler")
+		if options.MetricsRegistry != nil || options.CollectMetrics != nil {
+			return fmt.Errorf("native metrics cannot configure MetricsRegistry or CollectMetrics")
 		}
 	}
-	if options.WrapMetricsHandler != nil && options.MetricParser != nil {
-		return fmt.Errorf("WrapMetricsHandler cannot configure MetricParser")
+	if options.CollectMetrics != nil && options.MetricParser != nil {
+		return fmt.Errorf("CollectMetrics cannot configure MetricParser")
 	}
 	if options.MetricsHandler != nil && options.MetricsURL != "" {
 		return fmt.Errorf("native metrics cannot configure both MetricsHandler and MetricsURL")
@@ -505,7 +509,7 @@ func (as *AgentServer) validateMetricsOptions() error {
 		if options.NativeMetricsSchema != "" {
 			return fmt.Errorf("native metrics schema requires MetricsURL or MetricsHandler")
 		}
-		if options.WrapMetricsHandler == nil && (options.ResultFile != "") != (options.MetricParser != nil) {
+		if options.CollectMetrics == nil && (options.ResultFile != "") != (options.MetricParser != nil) {
 			return fmt.Errorf("result-file metrics require both ResultFile and MetricParser")
 		}
 		return nil

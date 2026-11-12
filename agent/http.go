@@ -27,11 +27,7 @@ func (as *AgentServer) metricsHandler() http.Handler {
 		return as.options.MetricsHandler
 	}
 	if as.options.MetricsURL == "" {
-		handler := as.metrics.resourceHandler(promhttp.HandlerFor(as.metrics.registry, promhttp.HandlerOpts{}))
-		if as.options.WrapMetricsHandler != nil {
-			handler = as.options.WrapMetricsHandler(handler)
-		}
-		return handler
+		return promhttp.HandlerFor(as.metrics, promhttp.HandlerOpts{})
 	}
 	target, _ := url.Parse(as.options.MetricsURL) // Checked by validateMetricsOptions.
 	proxy := &httputil.ReverseProxy{

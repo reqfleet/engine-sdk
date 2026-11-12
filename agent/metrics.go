@@ -45,6 +45,7 @@ type MetricsRegistry struct {
 	mu                           sync.RWMutex
 	registry                     *prometheus.Registry
 	resources                    resourceMetrics
+	collectionErr                error
 	labelLatencyHistogram        *prometheus.HistogramVec
 	labelLLMRespLatencyHistogram *prometheus.HistogramVec
 	statusCounter                *prometheus.CounterVec
@@ -155,7 +156,7 @@ func (r *MetricsRegistry) latencyHistogramForLabel(label string) *prometheus.His
 	return r.labelLatencyHistogram
 }
 
-// Reset clears every metric series and the resource run identity and baseline.
+// Reset clears every metric series, collection failure, and resource baseline.
 func (r *MetricsRegistry) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -167,11 +168,22 @@ func (r *MetricsRegistry) Reset() {
 	r.memGauge.Reset()
 	r.egressCounter.Reset()
 	r.resources.reset()
+	r.collectionErr = nil
 }
 
-// Gather implements prometheus.Gatherer without sampling resource usage.
+// Gather implements prometheus.Gatherer without collecting new samples. A
+// CollectMetrics failure is returned until Reset or the next successful launch.
 func (r *MetricsRegistry) Gather() ([]*dto.MetricFamily, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.collectionErr != nil {
+		return nil, r.collectionErr
+	}
 	return r.registry.Gather()
+}
+
+func (r *MetricsRegistry) setCollectionError(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.collectionErr = err
 }
