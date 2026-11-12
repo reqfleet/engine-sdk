@@ -177,7 +177,7 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 		log.Error(err)
 		return
 	}
-	metric.Label = metricschema.AdmitRequestLabel(metric.Label, labels, as.labelsUsageLimit, "")
+	metric.Label = metricschema.AdmitRequestName(metric.Label, labels, as.labelsUsageLimit, "")
 	em := as.options.EngineMeta
 	metric.CollectionID = em.CollectionID
 	metric.PlanID = em.PlanID
@@ -533,7 +533,7 @@ func (as *AgentServer) validateMetricsOptions() error {
 	if options.MetricsHandler != nil {
 		return nil
 	}
-	if options.NativeMetricsOverflowLabel != "" && options.NativeMetricsOverflowLabel != metricschema.OverflowLabel && options.NativeMetricsOverflowLabel != "_other_" {
+	if options.NativeMetricsOverflowLabel != "" && options.NativeMetricsOverflowLabel != metricschema.OverflowRequestName && options.NativeMetricsOverflowLabel != "_other_" {
 		return fmt.Errorf("native metrics overflow label must be others or _other_")
 	}
 	target, err := url.Parse(options.MetricsURL)

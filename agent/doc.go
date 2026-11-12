@@ -88,8 +88,8 @@
 // environment variable (metricschema.DefaultLabelLimit, ten, when unset or empty);
 // MakeAgentServer uses the same loader. NewAgentServer preserves zero.
 // Adapters can initialize native exporters from those options before construction.
-// metricschema.AdmitRequestLabel shares the SDK's bounded, stable admission policy
-// with exporters; metricschema.OverflowLabel names its reserved "others" series.
+// metricschema.AdmitRequestName shares the SDK's bounded, stable admission policy
+// with exporters; metricschema.OverflowRequestName names its reserved "others" series.
 // Exporters own synchronization, validation before admission, and per-run reset.
 // The SDK has no tier policy. Workloads inherit label_limit if present; Command.Env may override
 // it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce

@@ -69,7 +69,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	defer as.nativeMetricsLock.Unlock()
 	overflow := as.options.NativeMetricsOverflowLabel
 	if overflow == "" {
-		overflow = metricschema.OverflowLabel
+		overflow = metricschema.OverflowRequestName
 	}
 	var candidates []string
 	for name, family := range families {
@@ -107,7 +107,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 		}
 	}()
 	for _, name := range candidates {
-		if metricschema.AdmitRequestLabel(name, as.nativeLabels, as.labelsUsageLimit, overflow) == name {
+		if metricschema.AdmitRequestName(name, as.nativeLabels, as.labelsUsageLimit, overflow) == name {
 			admitted = append(admitted, name)
 		}
 	}
@@ -127,7 +127,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 				metrics = append(metrics, metric)
 				continue
 			}
-			mapped := metricschema.AdmitRequestLabel(label.GetValue(), as.nativeLabels, as.labelsUsageLimit, overflow)
+			mapped := metricschema.AdmitRequestName(label.GetValue(), as.nativeLabels, as.labelsUsageLimit, overflow)
 			if mapped != label.GetValue() {
 				label.Value = &overflow
 			}

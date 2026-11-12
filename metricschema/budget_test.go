@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestAdmitRequestLabel(t *testing.T) {
+func TestAdmitRequestName(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		limit    int
@@ -38,18 +38,18 @@ func TestAdmitRequestLabel(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			admitted := make(map[string]struct{})
 			for i, label := range test.input {
-				assert.Equal(t, test.want[i], metricschema.AdmitRequestLabel(label, admitted, test.limit, test.overflow))
+				assert.Equal(t, test.want[i], metricschema.AdmitRequestName(label, admitted, test.limit, test.overflow))
 			}
 			assert.Equal(t, test.admitted, admitted, "retain only the admitted names")
 		})
 	}
 }
 
-func TestAdmitRequestLabelRunReset(t *testing.T) {
+func TestAdmitRequestNameRunReset(t *testing.T) {
 	admitted := make(map[string]struct{})
-	assert.Equal(t, "old", metricschema.AdmitRequestLabel("old", admitted, 1, ""))
-	assert.Equal(t, metricschema.OverflowLabel, metricschema.AdmitRequestLabel("new", admitted, 1, ""))
+	assert.Equal(t, "old", metricschema.AdmitRequestName("old", admitted, 1, ""))
+	assert.Equal(t, metricschema.OverflowRequestName, metricschema.AdmitRequestName("new", admitted, 1, ""))
 	clear(admitted)
-	assert.Equal(t, "new", metricschema.AdmitRequestLabel("new", admitted, 1, ""))
-	assert.Equal(t, metricschema.OverflowLabel, metricschema.AdmitRequestLabel("old", admitted, 1, ""))
+	assert.Equal(t, "new", metricschema.AdmitRequestName("new", admitted, 1, ""))
+	assert.Equal(t, metricschema.OverflowRequestName, metricschema.AdmitRequestName("old", admitted, 1, ""))
 }
