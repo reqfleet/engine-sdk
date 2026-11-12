@@ -5,9 +5,9 @@ adapters using `github.com/reqfleet/engine-sdk/agent`: collection modes, metric 
 histogram boundaries. Adapters declare this profile in their configuration.
 
 The collector-free [`metricschema`](../metricschema) package owns the Go constants
-for metric names and reserved request labels, plus ordered label-list functions.
-The runtime and reporting clients use these shared definitions. Label lists are
-caller-owned; collectors, histogram bounds, and event recording remain in `agent`.
+for metric names and reserved request labels, ordered label-list functions, and
+canonical histogram boundaries. Returned label and boundary slices are caller-owned;
+collectors and event recording remain in `agent`.
 
 ## Integration modes
 
@@ -263,6 +263,18 @@ overflow-source names or values.
 
 
 ## Histogram compatibility
+
+Construct ordinary histograms with `metricschema.RequestLatencyBuckets()` and
+LLM response histograms with `metricschema.LLMResponseLatencyBuckets()`. Both return
+fresh, caller-owned slices of finite upper bounds in increasing order, in
+**milliseconds**, excluding `+Inf`. Mutating a returned slice does not change
+another caller's bounds or future calls.
+
+Pass these bounds directly to Prometheus histogram constructors, which add the
+implicit `+Inf` bucket. Exposition validators must append `math.Inf(1)` to check
+the complete wire profile. Obtain bounds once when constructing a collector or
+validator, not per recorded sample. Do not reconstruct them from
+`prometheus.DefBuckets`; the profiles below are the fixed reporting contract.
 
 Every ordinary histogram must expose exactly these cumulative upper bounds in
 milliseconds, shared by JMeter, Locust, Replay, and normalized native adapters:

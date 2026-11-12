@@ -33,7 +33,7 @@ var nativeTestMeta = EngineMeta{CollectionID: "collection", PlanID: "plan", Engi
 func nativeSnapshot(t *testing.T, meta EngineMeta, runID string, observations []nativeObservation) string {
 	t.Helper()
 	registry := prometheus.NewRegistry()
-	latency := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: metricschema.RequestLatency, Buckets: shibuyaBuckets}, metricschema.LatencyLabels())
+	latency := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: metricschema.RequestLatency, Buckets: metricschema.RequestLatencyBuckets()}, metricschema.LatencyLabels())
 	status := prometheus.NewCounterVec(prometheus.CounterOpts{Name: metricschema.StatusCounter}, metricschema.StatusLabels())
 	egress := prometheus.NewCounterVec(prometheus.CounterOpts{Name: metricschema.EgressBytesCounter}, metricschema.EgressLabels())
 	threads := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: metricschema.ThreadsGauge}, metricschema.ThreadsLabels())

@@ -23,14 +23,6 @@ type ShibuyaMetric struct {
 	EgressBytes  float64
 }
 
-func convertToMilliBuckets(buckets []float64) []float64 {
-	milliBuckets := make([]float64, len(buckets))
-	for i, b := range buckets {
-		milliBuckets[i] = b * 1000
-	}
-	return milliBuckets
-}
-
 func latencyHistogramForLabel(label string) *prometheus.HistogramVec {
 	if strings.EqualFold(label, metricschema.LLMResponseLabel) {
 		return labelLLMRespLatencyHistogram
@@ -58,15 +50,13 @@ func (sm ShibuyaMetric) LabelIsValid() (bool, error) {
 }
 
 var (
-	shibuyaBuckets        = append([]float64{1, 2.5}, convertToMilliBuckets(prometheus.DefBuckets)...)
-	shibuyaLLMRespBuckets = []float64{100, 250, 500, 1000, 2500, 5000, 7500, 10000, 15000, 20000, 30000, 45000, 60000, 90000, 120000, 180000, 300000}
 	labelLatencyHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    metricschema.RequestLatency,
-		Buckets: shibuyaBuckets,
+		Buckets: metricschema.RequestLatencyBuckets(),
 	}, metricschema.LatencyLabels())
 	labelLLMRespLatencyHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    metricschema.LLMResponseLatency,
-		Buckets: shibuyaLLMRespBuckets,
+		Buckets: metricschema.LLMResponseLatencyBuckets(),
 	}, metricschema.LatencyLabels())
 
 	// This is similar to Latency but cannot use histogram here because we need a very accurate count of every status error that occurred.
