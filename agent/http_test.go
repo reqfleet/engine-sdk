@@ -20,6 +20,7 @@ import (
 
 func TestMetricsOptionsAdmission(t *testing.T) {
 	parser := func(string) (ShibuyaMetric, error) { return ShibuyaMetric{}, nil }
+	collector := func(context.Context, RunContext) error { return nil }
 	handlerCalls := 0
 	exporter := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		handlerCalls++
@@ -36,6 +37,21 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 		resultMetrics bool
 	}{
 		{name: "registry"},
+		{name: "supplied registry", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry()}},
+		{name: "supplied parser registry", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), ResultFile: "results", MetricParser: parser}, resultMetrics: true},
+		{name: "registry collector", options: AgentServerOptions{CustomIngestMetrics: collector}},
+		{name: "supplied registry collector", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), CustomIngestMetrics: collector}},
+		{name: "collector workload output", options: AgentServerOptions{CustomIngestMetrics: collector, ResultFile: "results.csv"}},
+		{name: "negative collector label limit", options: AgentServerOptions{CustomIngestMetrics: collector, LabelsUsageLimit: -1}, invalid: true},
+		{name: "registry handler conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "registry URL conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "registry schema conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "collector parser conflict", options: AgentServerOptions{CustomIngestMetrics: collector, ResultFile: "results", MetricParser: parser}, invalid: true},
+		{name: "collector handler conflict", options: AgentServerOptions{CustomIngestMetrics: collector, MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "collector URL conflict", options: AgentServerOptions{CustomIngestMetrics: collector, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
+		{name: "collector schema conflict", options: AgentServerOptions{CustomIngestMetrics: collector, NativeMetricsSchema: "native-v2"}, invalid: true},
+		{name: "collector folding conflict", options: AgentServerOptions{CustomIngestMetrics: collector, FoldNativeMetrics: true}, invalid: true},
+		{name: "collector overflow conflict", options: AgentServerOptions{CustomIngestMetrics: collector, NativeMetricsOverflowLabel: "others"}, invalid: true},
 		{name: "result events", options: AgentServerOptions{ResultFile: "results", MetricParser: parser}, resultMetrics: true},
 		{name: "negative result label limit", options: AgentServerOptions{ResultFile: "results", MetricParser: parser, LabelsUsageLimit: -1}, invalid: true},
 		{name: "negative native label limit", options: AgentServerOptions{MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: -1}, invalid: true},
@@ -97,24 +113,23 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 }
 
 func TestMetricsHandlerUsesRegistry(t *testing.T) {
-	cpuGauge.WithLabelValues("collection", "plan", "run", "zone", "engine").Set(7)
-	t.Cleanup(func() { cpuGauge.DeleteLabelValues("collection", "plan", "run", "zone", "engine") })
-	as := NewAgentServer(AgentServerOptions{})
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	recorder := httptest.NewRecorder()
+	registry := NewMetricsRegistry()
+	as := NewAgentServer(AgentServerOptions{MetricsRegistry: registry})
+	registry.RecordEvent(ShibuyaMetric{
+		CollectionID: "collection", PlanID: "plan", RunID: "run", EngineID: "engine", Zone: "zone",
+		Label: "checkout", Status: "200", Latency: 250, EgressBytes: 1024, Threads: 7,
+	})
+	families := nativeScrape(t, as.metricsHandler())
+	require.Len(t, families, 4)
+	assert.Equal(t, map[string]float64{"checkout/200": 1}, nativeCounters(families["shibuya_status_counter"]))
+	assert.Equal(t, float64(1024), families["shibuya_egress_bytes_counter"].Metric[0].GetCounter().GetValue())
+	assert.Equal(t, float64(7), families["shibuya_threads_gauge"].Metric[0].GetGauge().GetValue())
+	histogram := families["shibuya_latency_label_milliseconds"].Metric[0].GetHistogram()
+	assert.Equal(t, uint64(1), histogram.GetSampleCount())
+	assert.Equal(t, float64(250), histogram.GetSampleSum())
 
-	as.metricsHandler().ServeHTTP(recorder, req)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-	}
-	body, err := io.ReadAll(recorder.Result().Body)
-	if err != nil {
-		t.Fatalf("ReadAll() error = %v", err)
-	}
-	if !strings.Contains(string(body), "shibuya_cpu_gauge") {
-		t.Fatalf("metrics body did not include shibuya_cpu_gauge: %s", string(body))
-	}
+	other := NewAgentServer(AgentServerOptions{})
+	assert.Empty(t, nativeScrape(t, other.metricsHandler()), "a second server must not expose the supplied registry")
 }
 
 func TestPreparationProgressRequiresAuthentication(t *testing.T) {

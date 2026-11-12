@@ -51,26 +51,28 @@ a new engine with Reqfleet.
 
 ## Using the SDK
 
-Add the SDK to an adapter's Go module:
+Check the [latest release notes](https://github.com/reqfleet/engine-sdk/releases/latest)
+for the current version and changes. Add the SDK to an adapter's Go module:
 
 ```sh
-go get github.com/reqfleet/engine-sdk@v0.1.1
+go get github.com/reqfleet/engine-sdk@latest
 ```
 
-Use the Go toolchain required by `go.mod` for the SDK revision you build; this
-checkout declares its requirement in [go.mod](go.mod). Pin the SDK version and
-review compatibility when upgrading: the Go API is pre-1.0.
+Pin the SDK version and review compatibility when upgrading: the Go API is pre-1.0.
+Read the linked documentation at the source tag matching your pinned release;
+the default branch may contain unreleased changes. Use the Go toolchain required
+by that release's [go.mod](go.mod).
 
-For adapter development, start with [AGENTS.md](AGENTS.md). It covers the public
-packages, callback lifecycle, configuration, workspace ownership, metrics
-integration, and verification workflow, with links to the detailed contracts.
+For adapter development, start with the
+[adapter guide](AGENTS.md).
+It covers the public packages, callback lifecycle, configuration, workspace
+ownership, metrics integration, and verification workflow, with links to the
+detailed contracts.
 
 To resolve SDK-owned deployment settings before initializing adapter components,
 use `agent.LoadAgentServerOptions`, then pass the resolved options to
 `agent.NewAgentServer`. See the [environment precedence and native-exporter
 example](AGENTS.md#resolve-deployment-options-before-construction).
-This API is unreleased and is not included in `v0.3.0`; adapters must pin a
-published release containing it before removing their local environment parsers.
 
 Adapters with an in-process normalized exporter can pass its `http.Handler` as
 `AgentServerOptions.MetricsHandler`, with
@@ -80,15 +82,6 @@ loopback proxy is needed. `ResultFile` may still name workload output without
 `MetricParser`. The adapter retains parsing and exporter-state ownership; see the
 [example](AGENTS.md#resolve-deployment-options-before-construction) and
 [configuration contract](agent/metrics.md#integration-modes).
-`MetricsHandler` is also unreleased and absent from `v0.3.0`; publish and pin a
-release containing it before removing an adapter's listener/`MetricsURL` wiring.
-
-Custom exporters can reuse the public
-[`containerstats`](containerstats) package to read Linux cgroup CPU and memory
-usage without importing the agent runtime or Prometheus. The SDK runtime uses
-the same readers. See the [resource metrics contract](agent/metrics.md#runtime-resource-metrics)
-for units, sampling, and exporter ownership. This public package is unreleased;
-pin a development revision or a published release containing it before importing it.
 
 ## Coordinator backward compatibility
 
@@ -114,12 +107,10 @@ Deployed agents require Linux containers, including writable workspace paths and
 cgroup CPU/memory files. Unix workload execution uses process groups so stopping
 a run also terminates its descendants.
 
-This checkout also supports Windows `amd64` and `arm64` builds for clients that
+The SDK also supports Windows `amd64` and `arm64` builds for clients that
 import SDK types and handlers. It does not support Windows agent execution:
 `AgentServer.Run()` returns an error matching `errors.ErrUnsupported` before
-starting workers, coordinator subscriptions, or HTTP listeners. The Windows
-compatibility fix is unreleased; consumers pinned to `v0.1.1` need a release
-containing this fix.
+starting workers, coordinator subscriptions, or HTTP listeners.
 
 The PR workflow builds both Windows architectures and runs the unsupported
 execution contract tests on a Windows runner. Linux retains the full SDK race
@@ -144,11 +135,6 @@ The [`validation`](validation/doc.go) package defines a public Go contract for
 optional, best-effort upload checks, separate from the agent runtime. Validation
 and label counting provide early user feedback; neither is a runtime-safety
 capability.
-
-The `validation` package and [`jsonvalidator`](examples/jsonvalidator) example
-are unreleased and planned for `v0.2.0`; the `v0.1.1` installation above does not
-include them. Until that release is available, use a pinned development revision
-containing this contract.
 
 Implement `validation.Validator` with the signature:
 

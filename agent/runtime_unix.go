@@ -26,11 +26,6 @@ func (as *AgentServer) Run() error {
 	if options.EngineMeta.CoordinatorIP == "" {
 		return fmt.Errorf("coordinator endpoint is not configured")
 	}
-	go func() {
-		if err := as.reportOwnMetrics(5 * time.Second); err != nil {
-			options.Logger.Fatal(err)
-		}
-	}()
 	go as.runRequestWorker(context.Background())
 	go func() {
 		for {
@@ -99,6 +94,12 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	readers.Go(func() { as.streamToLogger(stderr, "stderr") })
 	monitorCtx, stopMonitor := context.WithCancel(run.ctx)
 	var monitors sync.WaitGroup
+	if as.metrics != nil {
+		monitors.Go(func() { as.reportOwnMetrics(monitorCtx, 5*time.Second) })
+	}
+	if as.options.CustomIngestMetrics != nil {
+		monitors.Go(func() { as.customIngesterRunner(monitorCtx, run) })
+	}
 	if as.options.Observe != nil {
 		monitors.Go(func() { as.observeRun(monitorCtx, run) })
 	}
@@ -125,6 +126,13 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	stopMonitor()
 	monitors.Wait()
 	readers.Wait()
+	var metricsErr error
+	if as.options.CustomIngestMetrics != nil {
+		metricsErr = as.collectFinalMetrics(run)
+	}
+	if as.metrics != nil {
+		as.sampleOwnMetrics()
+	}
 	if as.options.Progress != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), FinalProgressTimeout)
 		as.collectProgress(ctx, run)
@@ -135,6 +143,10 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	phase := protocol.FailureExecution
 	if run.status.StartupStatus == protocol.StartupStatePending {
 		phase = protocol.FailureStartup
+	}
+	if metricsErr != nil && run.failure == nil {
+		run.failure = metricsErr
+		run.failurePhase = phase
 	}
 	as.finishRunLocked(run, waitErr, phase, exitCode)
 	as.stateLock.Unlock()

@@ -20,7 +20,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/hpcloud/tail"
-	"github.com/reqfleet/engine-sdk/containerstats"
 	"github.com/reqfleet/engine-sdk/internal/coordinator"
 	"github.com/reqfleet/engine-sdk/internal/pubsub"
 	"github.com/reqfleet/engine-sdk/metricschema"
@@ -37,6 +36,9 @@ const (
 	// FinalProgressTimeout bounds the final Progress callback's fresh context.
 	// The callback must honor cancellation.
 	FinalProgressTimeout = 2 * time.Second
+	// FinalMetricsTimeout bounds the final CustomIngestMetrics callback's fresh context.
+	// The callback must honor cancellation.
+	FinalMetricsTimeout = 2 * time.Second
 )
 
 var STDERR = "/dev/stderr"
@@ -84,6 +86,7 @@ type AgentServer struct {
 	// Concurrent access fields
 	bus      chan metricEvent
 	requests chan agentRequest
+	metrics  *MetricsRegistry
 	// Label tracking
 	labelsLock       sync.RWMutex
 	labelsByRun      map[string]map[string]struct{}
@@ -146,6 +149,10 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 	}
 	if opts.MetricsURL == "" && opts.MetricsHandler == nil {
 		as.labelsByRun = make(map[string]map[string]struct{})
+		as.metrics = opts.MetricsRegistry
+		if as.metrics == nil {
+			as.metrics = NewMetricsRegistry()
+		}
 	}
 	return as
 }
@@ -185,7 +192,7 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 	metric.RunID = event.runID
 	metric.Zone = em.Zone
 
-	metric.ToPrometheus()
+	as.metrics.RecordEvent(metric)
 }
 
 func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
@@ -223,43 +230,6 @@ func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
 			case as.bus <- metricEvent{runID: runID, line: line.Text}:
 			}
 		}
-	}
-}
-
-func (as *AgentServer) reportOwnMetrics(interval time.Duration) error {
-	prev := uint64(0)
-	engineMeta := as.options.EngineMeta
-	engineID := engineMeta.EngineID
-	collectionID := engineMeta.CollectionID
-	planID := engineMeta.PlanID
-	engineNumber := engineID
-	zone := engineMeta.Zone
-	for {
-		time.Sleep(interval)
-		// we don't need to strictly thread safety here
-		// this is for code simplicity
-		runID := as.getActiveRunID()
-		if runID == "" {
-			continue
-		}
-		cpuUsage, err := containerstats.ReadCPUUsage()
-		if err != nil {
-			return err
-		}
-		if prev == 0 {
-			prev = cpuUsage
-			continue
-		}
-		used := float64(cpuUsage-prev) / float64(interval.Microseconds())
-		prev = cpuUsage
-		memoryUsage, err := containerstats.ReadMemoryUsage()
-		if err != nil {
-			return err
-		}
-		cpuGauge.WithLabelValues(collectionID,
-			planID, runID, zone, engineNumber).Set(used)
-		memGauge.WithLabelValues(collectionID,
-			planID, runID, zone, engineNumber).Set(float64(memoryUsage))
 	}
 }
 
@@ -379,6 +349,29 @@ type AgentServerOptions struct {
 	Stop                func(context.Context, RunContext, Process) error
 	// StopTimeout overrides DefaultStopTimeout when positive.
 	StopTimeout time.Duration
+	// MetricsRegistry supplies the SDK's canonical collectors. If nil, the SDK
+	// creates a per-server registry. It cannot be combined with native sources.
+	// Do not share one registry between servers.
+	MetricsRegistry *MetricsRegistry
+	// CustomIngestMetrics is for adapters that normalize engine output themselves
+	// and record samples in the SDK-owned MetricsRegistry.
+	//
+	// Use it when MetricParser's complete-request event model does not fit.
+	// For example, k6 CSV emits separate request-duration, received-byte and
+	// concurrency samples. The adapter reads new records, validates and admits
+	// samples, and updates the corresponding SDK metrics.
+	//
+	// The SDK owns scheduling, HTTP exposition and CPU/memory reporting.
+	// This callback must not implement those responsibilities.
+	//
+	// The SDK calls it after launch, every 250ms, and once after workload exit
+	// to drain final output before workspace release. Calls never overlap.
+	// Honor the supplied context; the final call uses FinalMetricsTimeout.
+	// Errors fail the run and registry scrapes until Reset or the next launch.
+	//
+	// Cannot be combined with MetricParser or native metrics sources.
+	// ResultFile may name engine output; the SDK does not tail it.
+	CustomIngestMetrics func(context.Context, RunContext) error
 	// MetricsURL proxies an external normalized endpoint; it cannot be combined
 	// with MetricsHandler or MetricParser.
 	MetricsURL string
@@ -509,6 +502,14 @@ func (as *AgentServer) validateMetricsOptions() error {
 	if options.LabelsUsageLimit < 0 {
 		return fmt.Errorf("metrics label limit must be nonnegative")
 	}
+	if options.MetricsURL != "" || options.MetricsHandler != nil {
+		if options.MetricsRegistry != nil || options.CustomIngestMetrics != nil {
+			return fmt.Errorf("native metrics cannot configure MetricsRegistry or CustomIngestMetrics")
+		}
+	}
+	if options.CustomIngestMetrics != nil && options.MetricParser != nil {
+		return fmt.Errorf("CustomIngestMetrics cannot configure MetricParser")
+	}
 	if options.MetricsHandler != nil && options.MetricsURL != "" {
 		return fmt.Errorf("native metrics cannot configure both MetricsHandler and MetricsURL")
 	}
@@ -519,7 +520,7 @@ func (as *AgentServer) validateMetricsOptions() error {
 		if options.NativeMetricsSchema != "" {
 			return fmt.Errorf("native metrics schema requires MetricsURL or MetricsHandler")
 		}
-		if (options.ResultFile != "") != (options.MetricParser != nil) {
+		if options.CustomIngestMetrics == nil && (options.ResultFile != "") != (options.MetricParser != nil) {
 			return fmt.Errorf("result-file metrics require both ResultFile and MetricParser")
 		}
 		return nil

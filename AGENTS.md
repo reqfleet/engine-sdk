@@ -3,6 +3,8 @@
 Use this file when implementing an engine adapter or changing the SDK. Keep the
 project introduction, Reqfleet motivation, and basic architecture in
 [README.md](README.md); keep implementation workflow and constraints here.
+README describes published releases only. Keep unreleased APIs and development
+contracts here and in package documentation until they ship.
 
 ## Responsibility boundary
 
@@ -17,7 +19,7 @@ the engine-specific adapter code and its runnable image.
 | Input artifacts | Serves test scripts, data, optional native config, and dependency declarations selected for the run | Downloads and stages files before the relevant callbacks | Declare expected filenames/formats and consume staged paths; generate engine-local files only where needed |
 | Dependencies | Supplies the declaration, if any, and authorizes the preparation stage | Stages the declaration, invokes the hook, and exposes preparation status | Install, remove, and reconcile dependencies in `PrepareDependencies`, including cancellation and rollback |
 | Lifecycle | Sends prepare/start/stop commands and the stop reason; polls agent status | Coordinator subscription, lifecycle state, command launch, process supervision, and cleanup | Supply `BuildCommand` and any needed preparation, readiness, progress, or graceful-stop hooks |
-| Metrics | Owns tier policy, storage, aggregation, and reporting; the collector scrapes the agent | Exposes `/metrics`; ingests parsed events with label admission, serves an in-process handler, proxies native metrics, or folds URL-backed snapshots when explicitly enabled | Map engine output to the reporting contract through a parser, normalized handler, or native endpoint; enforce configured native label limits unless opting into SDK folding; retain native cumulative source series |
+| Metrics | Owns tier policy, storage, aggregation, and reporting; the collector scrapes the agent | Owns canonical per-agent collectors and resource sampling; ingests parsed events, serves direct registry updates or native handlers, proxies native endpoints, or explicitly folds URL snapshots | Translate engine output into SDK recording methods, a parser, or a complete native exposition; validate/admit direct samples and retain final output |
 
 For a new engine, agree the settings schema, artifact/config filenames and
 rendering, dependency format, and image launch requirements with the control-plane
@@ -51,10 +53,12 @@ adapter is supplied here.
 | [`agent/run.go`](agent/run.go), [`agent/command.go`](agent/command.go) | `RunContext`, `Workspace`, `Process`, and the command returned by an adapter |
 | [`agent/lifecycle.go`](agent/lifecycle.go) | SDK-owned preparation, lifecycle state, observations, and cancellation |
 | [`agent/runtime_unix.go`](agent/runtime_unix.go), [`agent/runtime_unsupported.go`](agent/runtime_unsupported.go) | Unix runtime startup, process supervision and cleanup; explicit execution rejection on non-Unix systems |
-| [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, result-event collectors, native request-label admission and snapshot folding |
+| [`agent/metrics_collection.go`](agent/metrics_collection.go) | SDK-owned `CustomIngestMetrics` runner, cancellation, and final post-exit ingestion |
+| [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/resource_metrics.go`](agent/resource_metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, per-agent `MetricsRegistry`, independent recording methods, SDK resource sampling, native admission and folding |
 | [`protocol`](protocol) | Coordinator messages, explicit run/artifact assignments, lifecycle states, errors, and artifact paths |
 | [`metricschema`](metricschema) | Collector-free metric names, reserved request names, request-name admission, ordered Prometheus labels, and caller-owned histogram boundaries |
-| [`containerstats`](containerstats) | Public cgroup CPU/memory reader API backed by `internal/containerstats`, shared by the runtime and adapter-owned exporters; see the [resource metrics contract](agent/metrics.md#runtime-resource-metrics) |
+| [`containerstats`](containerstats) | Raw cgroup CPU/memory readers backed by `internal/containerstats`; no rate calculation or run lifecycle policy |
+| [`resources`](resources) | Synchronized `Sampler` for CPU rates, memory bytes and run reset, shared by the runtime and adapter-owned exporters; see the [resource metrics contract](agent/metrics.md#runtime-resource-metrics) |
 | [`validation`](validation/doc.go) | Synchronous upload-validation contract, structured diagnostics, and result checks; not part of agent execution |
 | [`examples/jsonvalidator`](examples/jsonvalidator) | Working JSON request-plan validator using only standard-library and public SDK dependencies |
 | [`internal`](internal) | SDK-only artifact transport, subscriptions, and cgroup reader implementation |
@@ -153,6 +157,16 @@ scrapes, and honor the incoming scrape context. No local `label_limit` parser is
 needed. An existing normalized `http.Handler` can be assigned directly to
 `options.MetricsHandler`; do not wrap it in another server or `MetricsURL`.
 
+For adapters that parse engine samples themselves, prefer SDK-owned collectors:
+create `agent.NewMetricsRegistry()`, pass it to the adapter and
+`options.MetricsRegistry`, and set `options.CustomIngestMetrics` to the adapter's
+ingestion callback. Leave `MetricParser`, `MetricsHandler`, and native options unset.
+Use independent recording methods rather than defining collectors or reporting
+CPU/memory. Collection runs independently of scrapes, with a final post-exit call
+before workspace reuse. Call `registry.Reset()` with parser/admission reset in
+`BeforeStart`, under the adapter state lock. See
+[the recording and lifecycle contract](agent/metrics.md#sdk-owned-registry).
+
 ## Implement an adapter
 
 ### 1. Consume control-plane inputs
@@ -176,7 +190,7 @@ artifacts yourself.
   the engine-specific installation logic in your container.
 - `ResultFile`: you choose a local output name and configure the engine to write
   to `RunContext.ResultFile`. With `MetricParser`, the SDK ingests its events;
-  with `MetricsHandler` or `MetricsURL`, it remains ordinary workload output.
+  with `CustomIngestMetrics`, `MetricsHandler`, or `MetricsURL`, it remains ordinary workload output.
   This is produced by the engine, not an artifact supplied by the control plane.
 
 Use filenames, not paths, for these options; the SDK uses their basenames for
@@ -221,6 +235,7 @@ points below. Their exact signatures are in [`agent/server.go`](agent/server.go)
 | `BeforeStart` | Prepare engine-specific run files after execution artifacts are staged and before command construction. |
 | `BuildCommand` | Return `agent.Command{Command, Args, Dir, Env}` describing the primary workload. Do not start or wait for that process. |
 | `Observe` | Return `protocol.ObservationPending`, `ObservationReady`, or `ObservationWorkComplete`. Use pending for a healthy engine that is not ready; an error fails the run and initiates shutdown. |
+| `CustomIngestMetrics` | Normalize engine samples that do not fit `MetricParser`'s complete-request event model, such as k6's independent CSV points, into the SDK registry. Called after launch, every 250ms and once after live callbacks/processes finish with a fresh two-second context. Honor cancellation. Errors fail the run and registry scrapes. The SDK owns scheduling, HTTP and resource sampling. |
 | `Progress` | Return a `protocol.Progress` with a nonempty engine schema `Kind` and valid JSON `Data`. This is optional reporting, not a lifecycle signal. |
 | `Stop` | Request graceful engine shutdown using the runtime-owned `Process.PID` or the engine's control API. Honor the supplied deadline and never reap the primary process. |
 
@@ -235,10 +250,11 @@ The handoff between owners is:
 3. On the coordinator's start request, the SDK stages the test, optional config,
    and data files. With no dependency declaration, it still invokes your
    dependency reconciliation hook, then `BeforeStart` and `BuildCommand`.
-4. The SDK launches the command, streams stdout/stderr, runs observation and
-   progress monitors, and ingests result events when configured.
+4. The SDK launches the command, streams stdout/stderr, runs observation,
+   progress and optional metric-collection loops, and ingests result events when configured.
 5. On exit or stop, the SDK terminates remaining descendants, joins callbacks
-   and readers, captures final progress, and only then releases the workspace.
+   and readers, collects final metrics/resources and progress, and only then
+   releases the workspace.
 
 `Command.Command` is an executable and `Args` is its argument vector, not a shell
 command string. Set `Dir` explicitly when the engine needs a working directory.
@@ -286,6 +302,13 @@ one of these modes:
   `EgressBytes`, and current concurrency into `Threads`. The runtime supplies
   run identity and accumulates metrics; parser errors drop the event. Never
   feed cumulative snapshots into a per-request event parser.
+- **Direct SDK registry updates:** supply a `MetricsRegistry` and optionally
+  `CustomIngestMetrics`; leave parser and native options unset. Translate validated,
+  admitted samples into `ObserveRequest`, `AddReceivedBytes`, or `SetConcurrency`.
+  `RecordEvent` is only for complete request events. The SDK defines collectors,
+  runs a background resource sampler, and serves stored values. The collection
+  callback owns engine-output draining, not resource sampling or HTTP exposition.
+  `ResultFile` may name ordinary output when using the collection callback.
 - **In-process normalized handler:** set `MetricsHandler` to the adapter's
   `http.Handler` and `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`; leave
   `MetricParser` nil and `MetricsURL` empty. The SDK invokes it directly at the
@@ -322,6 +345,9 @@ one overflow label per agent/run for a nonnegative budget N; zero folds all name
 in these SDK-managed modes. Default native proxying and in-process handlers do
 not enforce this budget; consult the metrics contract for configuration and
 engine-specific limit semantics.
+Direct registry recording does not perform admission again: validate source
+samples and use `metricschema.AdmitRequestName` with the resolved budget before
+recording. Source-specific aggregate byte labels must preserve their attribution.
 
 With SDK native folding enabled, names keep their slots across scrapes, with
 deterministic admission of new names within a scrape. Rejected scrapes do not

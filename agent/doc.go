@@ -71,12 +71,32 @@
 //
 // # Metrics integration
 //
-// Adapters either map result-file events with MetricParser, explicitly declare
-// MetricsSchemaShibuyaV1 for an adapter-normalized MetricsHandler or MetricsURL,
-// or expose the registry without request ingestion. These sources are mutually
-// exclusive; a Prometheus handler or URL alone is not a schema mapping.
+// Adapters map result-file events with MetricParser, update a MetricsRegistry
+// directly (optionally using CustomIngestMetrics for adapter-specific ingestion), or
+// declare MetricsSchemaShibuyaV1 for a normalized MetricsHandler or MetricsURL.
+// Parser, collection callback, and native sources are mutually exclusive. Registry-only
+// serving without ingestion does not provide complete request reporting.
 // See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
+//
+// MetricsRegistry owns per-agent collectors. ObserveRequest, AddReceivedBytes,
+// and SetConcurrency update independent samples; RecordEvent handles complete
+// events. Direct callers supply identity from RunContext and validate/admit names
+// before recording. There are no global collectors. Reset clears all series;
+// synchronize it with adapter state at the next BeforeStart.
+// CustomIngestMetrics lets adapters normalize independent engine samples that
+// do not fit MetricParser's complete-request event model. The SDK runs it after
+// launch and every 250ms, separately from Observe and Progress.
+// Honor cancellation; the SDK joins live callbacks and processes before
+// a final call with a fresh two-second context. Collection errors fail the run
+// and registry scrapes until reset or the next launch. Retain final metrics for
+// post-exit scrapes; HTTP requests never invoke collection.
+//
+// The SDK samples CPU/memory after launch, every five seconds, and once after
+// joining live monitors. The background worker stops at run termination and its
+// last values remain available. Resource read failures warn and skip an update,
+// without failing HTTP or the workload. MetricsHandler and MetricsURL never
+// start unused SDK resource collection.
 //
 // Adapters ingesting request samples must validate labels with
 // ShibuyaMetric.LabelIsValid before admission and discard invalid samples without
