@@ -48,8 +48,8 @@ const (
 )
 
 // ResourceExpectation checks resource availability, not changing resource values.
-// Present CPU values must be finite and nonnegative; memory must be finite and
-// positive. All resource series must carry agent identity without request labels.
+// Present CPU and memory values must be finite and nonnegative. All resource
+// series must carry agent identity without request labels.
 type ResourceExpectation struct {
 	CPU    MeasurementPresence
 	Memory MeasurementPresence
@@ -263,7 +263,7 @@ func validateMetrics(exposition string, expected MetricsExpectation) (MetricsSna
 				snapshot.Concurrency = &value
 			case metricschema.CPUGauge, metricschema.MemoryGauge:
 				value := metric.GetGauge().GetValue()
-				if !finiteNonnegative(value) || (name == metricschema.MemoryGauge && value == 0) {
+				if !finiteNonnegative(value) {
 					return snapshot, fmt.Errorf("%s: invalid resource value %g", name, value)
 				}
 			}
@@ -309,9 +309,9 @@ func validateMetrics(exposition string, expected MetricsExpectation) (MetricsSna
 }
 
 // Like the SDK native validator, check raw histogram components separately:
-// expfmt's typed parser overwrites repeated _sum and _count samples. Removing
-// comments (including TYPE declarations) makes expfmt preserve each sample as
-// an untyped metric, while still handling quoted names and escaped labels.
+// expfmt's typed parser overwrites repeated _sum and _count samples and drops NaN
+// bucket bounds. Removing comments (including TYPE declarations) makes expfmt
+// preserve each sample as an untyped metric, including its raw bound label.
 func validateRawMetricSamples(exposition string) error {
 	var samples strings.Builder
 	samples.Grow(len(exposition))
@@ -333,12 +333,15 @@ func validateRawMetricSamples(exposition string) error {
 			continue
 		}
 		var componentLabels []string
+		var bounds []float64
 		countComponent := false
 		switch name {
 		case metricschema.RequestLatency, metricschema.LLMResponseLatency:
 			return fmt.Errorf("%s: histogram base name is not a sample", name)
-		case metricschema.RequestLatency + "_bucket", metricschema.LLMResponseLatency + "_bucket":
-			componentLabels, countComponent = bucketLabels, true
+		case metricschema.RequestLatency + "_bucket":
+			componentLabels, countComponent, bounds = bucketLabels, true, requestLatencyBounds
+		case metricschema.LLMResponseLatency + "_bucket":
+			componentLabels, countComponent, bounds = bucketLabels, true, llmResponseLatencyBounds
 		case metricschema.RequestLatency + "_count", metricschema.LLMResponseLatency + "_count":
 			componentLabels, countComponent = histogramLabels, true
 		case metricschema.RequestLatency + "_sum", metricschema.LLMResponseLatency + "_sum":
@@ -347,8 +350,15 @@ func validateRawMetricSamples(exposition string) error {
 		seen := make(map[string]struct{}, len(family.Metric))
 		for _, metric := range family.Metric {
 			if componentLabels != nil {
-				if _, err := validateMetricLabels(metric, componentLabels, nil); err != nil {
+				labels, err := validateMetricLabels(metric, componentLabels, nil)
+				if err != nil {
 					return fmt.Errorf("%s: invalid histogram component: %w", name, err)
+				}
+				if bounds != nil {
+					bound, err := strconv.ParseFloat(labels["le"], 64)
+					if err != nil || !slices.Contains(bounds, bound) {
+						return fmt.Errorf("%s: invalid raw histogram bound %q", name, labels["le"])
+					}
 				}
 			}
 			if countComponent {

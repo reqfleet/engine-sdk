@@ -38,6 +38,9 @@
 // and liveness checks for additional engine-specific scenarios. Payload and
 // DataArtifactPath construct commands and artifact paths with harness identities.
 // Scenarios and runtime calls must be serialized; do not use parallel tests.
+// AwaitRequests tolerates transient scrape failures only while waiting for the
+// requested run's measurements within Wait. Explicit Scrape calls and final
+// metric assertions still require a successful response.
 //
 // # Container isolation and prerequisites
 //
@@ -85,8 +88,9 @@
 // the isolated disposable container described above. Allow sufficient test
 // timeouts for natural completion and bounded cleanup. Shared regressions cover
 // short-lived completion, unsuccessful completion, preparation cancellation,
-// rejected overlaps, cleanup deadlines, separate process groups, and live orphan
-// reaping using a real SDK fixture adapter and child HTTP workloads.
+// rejected overlaps, stale stops that initiate slow shutdown, transient scrape
+// recovery, query-sensitive run IDs, cleanup deadlines, separate process groups,
+// and live orphan reaping using a real SDK fixture adapter and child HTTP workloads.
 //
 // Include this package's untagged metric-validator tests in the consumer's unit
 // target (go test github.com/reqfleet/engine-sdk/conformance), and gate consumer

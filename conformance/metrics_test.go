@@ -137,6 +137,32 @@ func TestMetricValidationOptionalMeasurements(t *testing.T) {
 	require.ErrorContains(t, err, "resource must be absent")
 }
 
+func TestMetricValidationResourceValues(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		for _, value := range []string{"0", "1", "-1", "NaN", "+Inf", "-Inf"} {
+			t.Run(fmt.Sprintf("retained=%t/value=%s", retained, value), func(t *testing.T) {
+				text, expected := metricFixture()
+				if retained {
+					prior := expected.Identity
+					prior.RunID = "prior"
+					expected.AllowedPriorIdentities = []MetricIdentity{prior}
+					identity := strings.ReplaceAll(metricTestIdentity, `run_id="current"`, `run_id="prior"`)
+					text += fmt.Sprintf("shibuya_cpu_gauge{%s} %s\nshibuya_mem_gauge{%s} %s\n", identity, value, identity, value)
+				} else {
+					text = strings.ReplaceAll(text, "} 0.25\n", "} "+value+"\n")
+					text = strings.ReplaceAll(text, "} 4096\n", "} "+value+"\n")
+				}
+				_, err := validateMetrics(text, expected)
+				if value == "0" || value == "1" {
+					require.NoError(t, err, "genuine zero and positive resources satisfy required presence")
+				} else {
+					require.Error(t, err)
+				}
+			})
+		}
+	}
+}
+
 func TestMetricValidationRejectsContractViolations(t *testing.T) {
 	cases := []struct {
 		name string
@@ -170,7 +196,7 @@ func TestMetricValidationRejectsContractViolations(t *testing.T) {
 		{"nonfinite histogram sum", "} 20015.5\n", "} NaN\n"},
 		{"negative CPU", "} 0.25\n", "} -1\n"},
 		{"nonfinite CPU", "} 0.25\n", "} +Inf\n"},
-		{"zero memory", "} 4096\n", "} 0\n"},
+		{"negative memory", "} 4096\n", "} -1\n"},
 		{"nonfinite memory", "} 4096\n", "} NaN\n"},
 		{"request-labelled CPU", "shibuya_cpu_gauge{" + metricTestIdentity + "}", "shibuya_cpu_gauge{" + metricTestIdentity + `,label="request"}`},
 		{"wrong concurrency", "shibuya_threads_gauge{" + metricTestIdentity + "} 3", "shibuya_threads_gauge{" + metricTestIdentity + "} 2"},
@@ -525,7 +551,7 @@ func TestMetricValidationLLMRejectsInvalidCurrentMeasurements(t *testing.T) {
 	ordinary := latencyMetricFixture(metricschema.RequestLatency, metricTestIdentity, "llm_resp", []float64{100})
 	ordinary = strings.ReplaceAll(ordinary, metricschema.RequestLatency, metricschema.LLMResponseLatency)
 	_, err = validateMetrics(text+ordinary, expected)
-	require.ErrorContains(t, err, "bucket count")
+	require.Error(t, err)
 	for _, observation := range []float64{-1, math.NaN(), math.Inf(1)} {
 		expected.Requests["llm_resp"] = RequestExpectation{LLMResponseLatenciesMS: []float64{observation}}
 		_, err = validateMetrics(text+llm, expected)
@@ -829,6 +855,9 @@ func TestMetricValidationRawHistogramShapes(t *testing.T) {
 				"bucket without bound": text + fmt.Sprintf("%s_bucket{%s} 7\n", family, labels),
 				"sum with bound":       strings.Replace(text, family+"_sum{"+labels+"}", family+"_sum{"+labels+`,le="1"}`, 1),
 				"count with bound":     strings.Replace(text, family+"_count{"+labels+"}", family+"_count{"+labels+`,le="1"}`, 1),
+			}
+			for _, bound := range []string{"NaN", "invalid", "-Inf", "0.5", "1e999"} {
+				cases["extra bound "+bound] = text + fmt.Sprintf("%s_bucket{%s,le=%q} 0\n", family, labels, bound)
 			}
 			for name, malformed := range cases {
 				t.Run(fmt.Sprintf("%s/retained=%t/%s", family, retained, name), func(t *testing.T) {

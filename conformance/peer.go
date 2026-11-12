@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"sync"
@@ -52,7 +53,7 @@ func proofProgress(client *http.Client, runID string) (protocol.RunStatus, error
 }
 
 func proofProgressContext(ctx context.Context, client *http.Client, runID string) (protocol.RunStatus, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:8080/progress?run_id="+runID, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:8080/progress?run_id="+url.QueryEscape(runID), nil)
 	if err != nil {
 		return protocol.RunStatus{}, err
 	}

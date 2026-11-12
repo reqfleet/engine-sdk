@@ -166,6 +166,190 @@ func TestRuntimeBasicRejectsUnsuccessfulCompletion(t *testing.T) {
 	}
 }
 
+type runtimeTransportFunc func(*http.Request) (*http.Response, error)
+
+func (transport runtimeTransportFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+type metricsReadFailure struct{}
+
+func (metricsReadFailure) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestRuntimeAwaitRequestsRecoversFromTransientScrapeFailures(t *testing.T) {
+	contract := fixtureContract(t, "complete")
+	runtime := startRuntime(t, contract)
+	runtime.Start(t, "8901", contract.Basic.Complete)
+	runtime.Terminal(t, "8901", protocol.RunCompleted, proofWait)
+	stale := runtime.Scrape(t)
+	runtime.Start(t, "8902", contract.Basic.Reuse)
+	runtime.Running(t, "8902")
+	var scrapes atomic.Int64
+	runtime.Client.Transport = runtimeTransportFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/metrics" {
+			return http.DefaultTransport.RoundTrip(request)
+		}
+		switch scrapes.Add(1) {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Body:       io.NopCloser(strings.NewReader("current native output is not ready")),
+			}, nil
+		case 2:
+			return nil, fmt.Errorf("native metrics transport temporarily unavailable")
+		case 3:
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(metricsReadFailure{})}, nil
+		case 4:
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stale))}, nil
+		default:
+			return http.DefaultTransport.RoundTrip(request)
+		}
+	})
+	runtime.AwaitRequests(t, "8902", 1)
+	require.GreaterOrEqual(t, scrapes.Load(), int64(5), "previous-run counts must not satisfy the current run")
+	contract.Basic.AssertMetrics(t, runtime, "8902")
+}
+
+func TestRuntimeScrapeFailuresRemainStrictAndBounded(t *testing.T) {
+	requireRuntimeContainer(t)
+	const marker = "CONFORMANCE_REJECT_METRICS"
+	if mode := os.Getenv(marker); mode != "" {
+		var scrapes atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			scrapes.Add(1)
+			if mode == "blocked" {
+				<-request.Context().Done()
+				return
+			}
+			http.Error(w, "persistent native metrics failure", http.StatusBadGateway)
+		}))
+		defer server.Close()
+		client := server.Client()
+		client.Transport = runtimeTransportFunc(func(request *http.Request) (*http.Response, error) {
+			redirected := request.Clone(request.Context())
+			redirected.URL.Host = strings.TrimPrefix(server.URL, "http://")
+			return http.DefaultTransport.RoundTrip(redirected)
+		})
+		t.Cleanup(func() {
+			if scrapes.Load() > 1 {
+				fmt.Println("retried persistent metrics failure")
+			}
+		})
+		runtime := &Runtime{Client: client}
+		if mode == "scrape" {
+			runtime.Scrape(t)
+		} else {
+			runtime.AwaitRequests(t, "8902", 1)
+		}
+		return
+	}
+	self, err := os.Executable()
+	require.NoError(t, err)
+	for _, mode := range []string{"scrape", "await", "blocked"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, self, "-test.run=^TestRuntimeScrapeFailuresRemainStrictAndBounded$", "-test.timeout=25s")
+			command.Env = append(os.Environ(), marker+"="+mode)
+			command.WaitDelay = time.Second
+			started := time.Now()
+			output, err := command.CombinedOutput()
+			require.NoError(t, ctx.Err(), "%s", output)
+			require.Error(t, err, "persistent metrics failures must fail: %s", output)
+			require.NotContains(t, string(output), "test timed out")
+			require.Less(t, time.Since(started), proofWait+3*time.Second, "%s", output)
+			if mode == "scrape" {
+				require.Contains(t, string(output), "metrics returned HTTP 502")
+				return
+			}
+			require.Contains(t, string(output), "run 8902 must generate at least 1 real requests")
+			if mode == "await" {
+				require.Contains(t, string(output), "persistent native metrics failure")
+				require.Contains(t, string(output), "retried persistent metrics failure")
+			} else {
+				require.Contains(t, string(output), "context deadline exceeded")
+			}
+		})
+	}
+}
+
+func TestRuntimeBasicRejectsStaleStopDisruption(t *testing.T) {
+	requireRuntimeContainer(t)
+	const marker = "CONFORMANCE_REJECT_STALE_STOP"
+	if mode := os.Getenv(marker); mode != "" {
+		contract := fixtureContract(t, "complete")
+		runtime := startRuntime(t, contract)
+		var armed, reported atomic.Bool
+		runtime.Client.Transport = runtimeTransportFunc(func(request *http.Request) (*http.Response, error) {
+			response, err := http.DefaultTransport.RoundTrip(request)
+			if err != nil || response.StatusCode != http.StatusOK {
+				return response, err
+			}
+			metrics := request.URL.Path == "/metrics"
+			currentProgress := request.URL.Path == "/progress" && request.URL.Query().Get("run_id") == "8902"
+			if !metrics && (!currentProgress || !armed.Load()) {
+				return response, nil
+			}
+			body, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil {
+				return nil, err
+			}
+			if metrics {
+				if strings.Contains(string(body), `run_id="8902"`) {
+					armed.Store(true)
+				}
+			} else {
+				var status protocol.RunStatus
+				if err := json.Unmarshal(body, &status); err != nil {
+					return nil, err
+				}
+				// Keep the real SDK workload active, but expose the response a
+				// wrong-run stop with slow cancellation would produce. Terminal
+				// responses remain real so normal runtime cleanup still works.
+				if status.State == protocol.RunRunning {
+					if mode == "stopping" {
+						status.State = protocol.RunStopping
+						body, err = json.Marshal(status)
+						if err != nil {
+							return nil, err
+						}
+					} else {
+						response.StatusCode = http.StatusBadGateway
+						body = []byte("current run progress unavailable")
+					}
+					if reported.CompareAndSwap(false, true) {
+						fmt.Println("injected stale-stop disruption=" + mode)
+					}
+				}
+			}
+			response.Body = io.NopCloser(bytes.NewReader(body))
+			response.ContentLength = int64(len(body))
+			return response, nil
+		})
+		runBasic(t, runtime, contract.Basic)
+		return
+	}
+	self, err := os.Executable()
+	require.NoError(t, err)
+	for _, mode := range []string{"stopping", "unavailable"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, self, "-test.run=^TestRuntimeBasicRejectsStaleStopDisruption$", "-test.timeout=35s")
+			command.Env = append(os.Environ(), marker+"="+mode)
+			command.WaitDelay = time.Second
+			output, err := command.CombinedOutput()
+			require.NoError(t, ctx.Err(), "%s", output)
+			require.Error(t, err, "stale stop disruption must fail: %s", output)
+			require.Contains(t, string(output), "injected stale-stop disruption="+mode)
+			require.Contains(t, string(output), "stale stop must leave the active run running with readable progress")
+		})
+	}
+}
+
 func readFixturePID(t *testing.T, root, name string) int {
 	t.Helper()
 	var body []byte

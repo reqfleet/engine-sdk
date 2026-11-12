@@ -341,7 +341,12 @@ func runBasic(t *testing.T, r *Runtime, basic BasicScenarios) {
 	r.Running(t, "8902")
 	r.AwaitRequests(t, "8902", 1)
 	r.Stop(t, "8901")
-	require.Never(t, func() bool { status, err := r.Progress("8902"); return err == nil && status.State.Terminal() }, 400*time.Millisecond, 25*time.Millisecond)
+	for until := time.Now().Add(400 * time.Millisecond); time.Now().Before(until); {
+		status, err := r.Progress("8902")
+		require.NoError(t, err, "stale stop must leave the active run running with readable progress")
+		require.Equal(t, protocol.RunRunning, status.State, "stale stop must leave the active run running with readable progress")
+		time.Sleep(25 * time.Millisecond)
+	}
 	r.Stop(t, "8902")
 	r.Terminal(t, "8902", protocol.RunCanceled, proofWait)
 	reset := basic.AssertMetrics(t, r, "8902")
@@ -462,16 +467,30 @@ func (r *Runtime) Scrape(t *testing.T) string { t.Helper(); return Scrape(t, r.C
 // Scrape fetches the harness adapter's metrics with client and asserts HTTP 200.
 func Scrape(t *testing.T, client *http.Client) string {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8080/metrics", nil)
+	body, err := scrapeMetrics(context.Background(), client)
 	require.NoError(t, err)
+	return body
+}
+
+func scrapeMetrics(ctx context.Context, client *http.Client) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:8080/metrics", nil)
+	if err != nil {
+		return "", err
+	}
 	request.Header.Set("Authorization", "Bearer "+proofKey)
 	response, err := client.Do(request)
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, response.StatusCode, string(body))
-	return string(body)
+	if err != nil {
+		return "", err
+	}
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("metrics returned HTTP %d: %s", response.StatusCode, body)
+	}
+	return string(body), nil
 }
 
 // AssertAlive fails if the adapter has exited instead of remaining reusable.
@@ -487,20 +506,40 @@ func (r *Runtime) AssertAlive(t *testing.T) {
 // AwaitRequests waits for real normalized request counts for this run only.
 func (r *Runtime) AwaitRequests(t *testing.T, id string, minimum uint64) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		parser := expfmt.NewTextParser(model.UTF8Validation)
-		families, err := parser.TextToMetricFamilies(strings.NewReader(r.Scrape(t)))
-		if err != nil || families[metricschema.StatusCounter] == nil {
-			return false
+	ctx, cancel := context.WithTimeout(context.Background(), proofWait)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	var count float64
+	for ctx.Err() == nil {
+		body, err := scrapeMetrics(ctx, r.Client)
+		if ctx.Err() != nil && lastErr != nil {
+			break
 		}
-		var count float64
-		for _, metric := range families[metricschema.StatusCounter].Metric {
-			for _, label := range metric.Label {
-				if label.GetName() == metricschema.LabelRunID && label.GetValue() == id {
-					count += metric.GetCounter().GetValue()
+		lastErr = err
+		if err == nil {
+			parser := expfmt.NewTextParser(model.UTF8Validation)
+			families, err := parser.TextToMetricFamilies(strings.NewReader(body))
+			lastErr = err
+			count = 0
+			if err == nil && families[metricschema.StatusCounter] != nil {
+				for _, metric := range families[metricschema.StatusCounter].Metric {
+					for _, label := range metric.Label {
+						if label.GetName() == metricschema.LabelRunID && label.GetValue() == id {
+							count += metric.GetCounter().GetValue()
+						}
+					}
+				}
+				if count >= float64(minimum) {
+					return
 				}
 			}
 		}
-		return count >= float64(minimum)
-	}, proofWait, 100*time.Millisecond, "run %s must generate at least %d real requests", id, minimum)
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+		}
+	}
+	t.Fatalf("run %s must generate at least %d real requests; observed %g; last scrape error: %v", id, minimum, count, lastErr)
 }
