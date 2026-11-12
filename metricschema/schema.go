@@ -1,12 +1,12 @@
-// Package metricschema defines the metric names, ordered labels and request-label
-// limits of the shibuya-v1 metrics contract without depending on collectors.
+// Package metricschema defines metric names, ordered Prometheus labels, and
+// request-name admission for the shibuya-v1 contract without depending on collectors.
 package metricschema
 
 const (
 	// MaxRequestLabelBytes is the inclusive maximum request-label length in bytes,
 	// not characters. Labels of 1024 bytes or more are invalid.
 	MaxRequestLabelBytes = 1023
-	// DefaultLabelLimit is the default number of distinct named request labels
+	// DefaultLabelLimit is the default number of distinct request names
 	// per agent/run when label_limit is unset or empty. Overflow is additional.
 	// An explicitly configured zero budget is not replaced by this default.
 	DefaultLabelLimit = 10
@@ -63,6 +63,9 @@ const (
 )
 
 const (
+	// OverflowRequestName is the reserved name for samples exceeding the
+	// request-name budget. It does not consume an admission slot.
+	OverflowRequestName = "others"
 	// LLMResponseLabel selects the LLM response latency histogram.
 	LLMResponseLabel = "llm_resp"
 	// TTFTLabel identifies time-to-first-token measurements.

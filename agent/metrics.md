@@ -181,14 +181,19 @@ Rejection scope depends on the integration:
 These are metrics-reporting rules, not limits on workload HTTP URLs or permission
 to execute requests. Rejecting a metric event does not cancel or fail the workload.
 
-## Request-label budget
+## Request-name budget
+
+A **request name** identifies a request or request group, typically by URL or a
+custom grouping name. It is emitted as the value of the Prometheus `label`
+dimension; it is not a metric-family name or an arbitrary Prometheus label key.
+The Go admission API uses request-name terminology without changing that wire key.
 
 Runtime admission is configured by the nonnegative
 `AgentServerOptions.LabelsUsageLimit`, not by coordinator run messages or the
 upload-preflight callback. `NewAgentServer` uses that option directly, including
 zero; `LoadAgentServerOptions` and `MakeAgentServer` resolve it from the lowercase
 `label_limit` environment variable (`metricschema.DefaultLabelLimit`, **10**,
-when unset or empty). This default counts named labels only, excluding overflow.
+when unset or empty). This default counts request names only, excluding overflow.
 Adapters can use the loader's resolved budget to initialize native exporters,
 then pass the same options to `NewAgentServer` without another environment read.
 See the [environment configuration contract](../AGENTS.md#resolve-deployment-options-before-construction)
@@ -196,13 +201,31 @@ for validation and explicit-option precedence.
 The workload inherits `label_limit` when present in the agent environment,
 subject to `Command.Env` overrides. The SDK does not export `LabelsUsageLimit`
 or its default back into that environment.
-Result-file ingestion and opt-in SDK folding permit **at most N named request
-labels plus one overflow label per agent/run**. In those SDK-managed modes, zero
+Result-file ingestion and opt-in SDK folding permit **at most N request names
+plus one overflow name per agent/run**. In those SDK-managed modes, zero
 permits only overflow. Negative budgets are invalid in every mode.
 Native engines and in-process exporters enforce their own configured limits;
 default proxying and `MetricsHandler` do not enforce them. Explicit
 `FoldNativeMetrics: true` enables SDK enforcement only for URL-backed native
 engines as a last-resort fallback.
+
+Adapters can share the SDK's admission policy with
+`metricschema.AdmitRequestName(requestName, admitted, limit, overflowName)`.
+`metricschema.OverflowRequestName` is the public `others` constant; pass an empty
+`overflowName` to select it, or `_other_` when that is the producer's convention.
+The configured overflow name is reserved and does not consume a slot.
+
+Create `admitted := make(map[string]struct{})` for each agent/run and use the
+resolved `options.LabelsUsageLimit` as `limit`. Validate the source sample first,
+then use the returned name for all of its request metrics. Serialize access
+alongside collector updates, keep the budget and overflow name fixed, and clear
+the map when resetting the run's metrics. Only admitted names are retained; new
+map keys are cloned so the admission set does not keep entire CSV records alive.
+For an already-admitted name, the helper returns the input string unchanged;
+callers retaining that result own its backing-storage lifetime.
+The helper does not validate samples or aggregate metrics. Native snapshot
+consumers must also preserve all-or-nothing admission on rejected scrapes;
+the SDK rolls back tentative new admissions if folding fails.
 
 Replay uses `metrics.max_labels` from its prepared `config.yaml`. Run preparation
 preserves that value rather than rewriting it from `label_limit`; no extra command
@@ -227,7 +250,7 @@ rejected scrape consumes no admission slots.
 
 For opt-in folding, `AgentServerOptions.NativeMetricsOverflowLabel` defaults to
 `others`; use `_other_` for Replay's convention. These are the only supported values. Only the
-configured overflow name is exempt from the named-label budget; the other
+configured overflow name is exempt from the request-name budget; the other
 spelling is an ordinary name. Collisions with an existing overflow series are
 aggregated, not emitted as duplicate series.
 

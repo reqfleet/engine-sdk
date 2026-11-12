@@ -27,8 +27,6 @@ import (
 	"github.com/reqfleet/engine-sdk/protocol"
 )
 
-const labelOthers = "others"
-
 const (
 	// DefaultStopTimeout is the graceful-stop deadline used when StopTimeout is
 	// nonpositive. The runtime then escalates to SIGKILL.
@@ -179,15 +177,7 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 		log.Error(err)
 		return
 	}
-	// we limit the number of unique labels to avoid high cardinality in prometheus.
-	// If the label is new and we have reached the limit, we set it to "others"
-	if _, exists := labels[metric.Label]; metric.Label != labelOthers && !exists {
-		if len(labels) >= as.labelsUsageLimit {
-			metric.Label = labelOthers
-		} else {
-			labels[metric.Label] = struct{}{}
-		}
-	}
+	metric.Label = metricschema.AdmitRequestName(metric.Label, labels, as.labelsUsageLimit, "")
 	em := as.options.EngineMeta
 	metric.CollectionID = em.CollectionID
 	metric.PlanID = em.PlanID
@@ -543,7 +533,7 @@ func (as *AgentServer) validateMetricsOptions() error {
 	if options.MetricsHandler != nil {
 		return nil
 	}
-	if options.NativeMetricsOverflowLabel != "" && options.NativeMetricsOverflowLabel != labelOthers && options.NativeMetricsOverflowLabel != "_other_" {
+	if options.NativeMetricsOverflowLabel != "" && options.NativeMetricsOverflowLabel != metricschema.OverflowRequestName && options.NativeMetricsOverflowLabel != "_other_" {
 		return fmt.Errorf("native metrics overflow label must be others or _other_")
 	}
 	target, err := url.Parse(options.MetricsURL)

@@ -69,7 +69,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	defer as.nativeMetricsLock.Unlock()
 	overflow := as.options.NativeMetricsOverflowLabel
 	if overflow == "" {
-		overflow = labelOthers
+		overflow = metricschema.OverflowRequestName
 	}
 	var candidates []string
 	for name, family := range families {
@@ -95,9 +95,21 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	// Admit a stable set over the run, independent of family and exposition order.
 	slices.Sort(candidates)
 	candidates = slices.Compact(candidates)
-	remaining := max(0, as.labelsUsageLimit-len(as.nativeLabels))
-	if len(candidates) > remaining {
-		candidates = candidates[:remaining]
+	// Tentative admissions are protected by nativeMetricsLock. Roll back only
+	// this scrape's new names if aggregation or encoding fails.
+	admitted := candidates[:0]
+	committed := false
+	defer func() {
+		if !committed {
+			for _, name := range admitted {
+				delete(as.nativeLabels, name)
+			}
+		}
+	}()
+	for _, name := range candidates {
+		if metricschema.AdmitRequestName(name, as.nativeLabels, as.labelsUsageLimit, overflow) == name {
+			admitted = append(admitted, name)
+		}
 	}
 	var output bytes.Buffer
 	names := make([]string, 0, len(families))
@@ -115,9 +127,8 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 				metrics = append(metrics, metric)
 				continue
 			}
-			_, admitted := as.nativeLabels[label.GetValue()]
-			_, pending := slices.BinarySearch(candidates, label.GetValue())
-			if !admitted && !pending {
+			mapped := metricschema.AdmitRequestName(label.GetValue(), as.nativeLabels, as.labelsUsageLimit, overflow)
+			if mapped != label.GetValue() {
 				label.Value = &overflow
 			}
 			key := nativeSeriesKey(metric)
@@ -137,9 +148,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	}
 	// Only a completely valid scrape may consume admission slots. Never retain
 	// overflow source names or add cumulative snapshots to an earlier scrape.
-	for _, name := range candidates {
-		as.nativeLabels[name] = struct{}{}
-	}
+	committed = true
 	response.Body = io.NopCloser(bytes.NewReader(output.Bytes()))
 	response.ContentLength = int64(output.Len())
 	response.Header.Set("Content-Length", strconv.Itoa(output.Len()))

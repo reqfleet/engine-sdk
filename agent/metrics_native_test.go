@@ -210,6 +210,32 @@ func TestNativeMetricsFinishAndNextRun(t *testing.T) {
 	assert.Equal(t, map[string]float64{"b/200": 1, "others/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
 }
 
+func TestNativeMetricsFailedFoldPreservesEarlierAdmissions(t *testing.T) {
+	source, publish := nativeSource(t, nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{"z", "200", 1, 1}}))
+	as := NewAgentServer(AgentServerOptions{
+		FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL,
+		NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 2,
+	})
+	as.startMetricsRun("run")
+	handler := as.metricsHandler()
+	assert.Equal(t, map[string]float64{"z/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
+
+	// "a" tentatively takes the remaining slot, then the overflow sum fails.
+	identity := `collection_id="collection",plan_id="plan",run_id="run",engine_no="engine",zone="zone"`
+	publish("# TYPE shibuya_status_counter counter\n" +
+		"shibuya_status_counter{" + identity + `,label="a",status="200"} 1` + "\n" +
+		"shibuya_status_counter{" + identity + `,label="b",status="200"} 1e308` + "\n" +
+		"shibuya_status_counter{" + identity + `,label="c",status="200"} 1e308` + "\n")
+	require.Equal(t, http.StatusBadGateway, nativeResponse(handler).Code)
+
+	// A rejected scrape cannot evict "z" or prevent "b" from taking that slot.
+	publish(nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{
+		{"z", "200", 1, 1}, {"b", "200", 2, 2}, {"c", "500", 3, 3},
+	}))
+	assert.Equal(t, map[string]float64{"z/200": 1, "b/200": 1, "others/500": 1},
+		nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
+}
+
 func TestNativeMetricsRejectsMalformedScrapesWithoutConsumingBudget(t *testing.T) {
 	identity := `collection_id="collection",plan_id="plan",run_id="run",engine_no="engine",zone="zone"`
 	counter := "# TYPE shibuya_status_counter counter\nshibuya_status_counter{" + identity + `,label="a",status="200"} 1` + "\n"
