@@ -174,17 +174,10 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 
 	metricParser := as.options.MetricParser
 	metric, err := metricParser(event.line)
-	// we need to pass the engine meta(project, collection, plan), especially run id
-	// Run id is generated at controller side
 	if err != nil {
 		return
 	}
 
-	if _, err := metric.LabelIsValid(); err != nil {
-		log.Error(err)
-		return
-	}
-	metric.Label = metricschema.AdmitRequestName(metric.Label, labels, as.labelsUsageLimit, "")
 	em := as.options.EngineMeta
 	metric.CollectionID = em.CollectionID
 	metric.PlanID = em.PlanID
@@ -192,7 +185,9 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 	metric.RunID = event.runID
 	metric.Zone = em.Zone
 
-	as.metrics.RecordEvent(metric)
+	if err := recordRequestSample(as.metrics, labels, as.labelsUsageLimit, completeRequestSample(metric), true); err != nil {
+		log.Error(err)
+	}
 }
 
 func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {

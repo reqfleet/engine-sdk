@@ -14,7 +14,7 @@ collectors and event recording remain in `agent`.
 | Mode | `AgentServerOptions` | Ownership |
 | --- | --- | --- |
 | Result-file events | Nonempty `ResultFile`, non-nil `MetricParser`; leave `MetricsHandler` nil, `MetricsURL` and `NativeMetricsSchema` empty | The parser maps each result row to `agent.ShibuyaMetric`; the runtime ingests events into its registry. |
-| Direct SDK registry updates | Optional `MetricsRegistry: agent.NewMetricsRegistry()` and `CustomIngestMetrics`; leave `MetricParser`, `MetricsHandler`, and all native options unset | The adapter validates and admits engine samples, then updates SDK-defined collectors. The SDK schedules ingestion, samples resources, and serves stored values. |
+| Direct SDK registry updates | Optional `MetricsRegistry: agent.NewMetricsRegistry()` and `CustomIngestMetrics`; leave `MetricParser`, `MetricsHandler`, and all native options unset | The adapter normalizes engine samples; an optional `MetricsRecorder` owns request-name validation/admission, or the adapter manages it before low-level recording. The SDK schedules ingestion, samples resources, and serves stored values. |
 | In-process normalized handler | Non-nil `MetricsHandler`, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser`, empty `MetricsURL` | The adapter owns normalization, label limits, and exporter state; the SDK serves the handler directly behind its existing authentication. Folding options are not supported. |
 | Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` and `MetricsHandler` | The engine enforces its configured label limit and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
 | Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
@@ -96,18 +96,76 @@ Latency-only and status-only samples must not use `ObserveRequest` or
 `ObserveLatency` records a supplied zero latency; `RecordStatus` does not observe
 any latency. Neither operation changes received bytes or concurrency.
 
-The adapter owns source validation and request-name admission before calling
-these methods. Use `LabelIsValid` and `metricschema.AdmitRequestName` with the
-resolved label budget. Independent bytes or concurrency samples must not be
+The low-level registry leaves source validation and request-name admission to its
+caller. Use `LabelIsValid` and `metricschema.AdmitRequestName` with the resolved
+label budget, or use the optional recorder below. Direct methods do not perform
+a second admission pass. Independent bytes or concurrency samples must not be
 passed to `RecordEvent`; doing so invents requests. Preserve aggregate byte
 attribution when the source does not identify a request.
+
+#### Optional run-scoped recorder
+
+`agent.NewMetricsRecorder(registry, options.LabelsUsageLimit)` returns a recorder
+and an error. Supply a non-nil registry and the already-resolved nonnegative
+budget; the constructor does not read the environment, reset collectors, or
+start workers. Pass that same registry to `AgentServerOptions.MetricsRegistry`.
+Use one recorder for all request-labelled samples in one agent/run, without
+pre-admitting names. Separate recorders have independent admission state.
+
+`recorder.RecordSample(agent.RequestSample{...})` accepts a `Metric` and explicit
+`HasLatency`, `HasStatus`, `HasReceivedBytes`, and `HasConcurrency` flags. Set only
+the flags for measurements present in that source sample. Zero is a real
+measurement, not an absence marker. Latency uses the ordinary request histogram,
+including for `llm_resp`. For example, a latency-only sample is:
+
+```go
+err := recorder.RecordSample(agent.RequestSample{
+    Metric:     metric, // normalized milliseconds and caller-supplied run identity
+    HasLatency: true,
+})
+```
+
+`recorder.RecordEvent(metric)` selects all four measurements and preserves
+result-file event histogram routing. Both entry points share the SDK's
+result-file source-sample implementation: validate the original name, call
+`metricschema.AdmitRequestName` once, and use that admitted name for every
+request-labelled measurement present. An oversized label returns an error,
+consumes no slot, and updates no measurement, including sample-carried concurrency.
+Discard that sample; reporting rejection does not itself fail the workload.
+Engine-specific parsing, numeric validation, unit conversion, and attribution
+remain adapter-owned.
+
+For bytes attributed to a request, use `RecordSample` with `HasReceivedBytes`.
+For independently reported aggregate bytes, use
+`recorder.AddAggregateReceivedBytes(metric)`: it validates label length but
+preserves the aggregate label unchanged, without request admission or fabricated
+requests. Keep these source-specific aggregate labels bounded.
+`recorder.SetConcurrency(metric)` ignores `Label` and consumes no request slots.
+A concurrency-only `RequestSample` also consumes no slots, but its source request
+label is still validated. Independent measurements remain recordable after a
+different request sample is rejected. CPU/memory collection stays SDK-owned and
+does not use request-name admission.
+
+The recorder serializes admission with recording. The shared sample path holds
+the registry lock across validation, admission, and all selected updates, so a
+registry reset cannot split a sample. This does not promise transactional
+multi-family scrapes. Completed-run metrics and admission remain retained.
+This API owns admission only: callers still supply assigned identity in each
+metric, and it has no reset/new-run operation. Do not reuse a recorder across
+runs or use `registry.Reset()` as a recorder transition: that low-level operation
+clears collectors, not recorder admission. Assigned-identity binding and a single
+coordinated recorder transition are separately scoped in #34 and #35; there is
+no separate admission-reset API for adapters to orchestrate.
+
+#### Collection callback and registry lifecycle
 
 Use `CustomIngestMetrics func(context.Context, RunContext) error` when the adapter
 must normalize engine output that does not fit `MetricParser`'s complete-request
 event model. For example, k6 CSV emits separate request-duration, received-byte
-and concurrency samples. Read new output, validate and admit samples, then record
-them using the SDK methods. The SDK owns scheduling, HTTP exposition
-and CPU/memory reporting; the callback must not duplicate those responsibilities.
+and concurrency samples. Read new output, normalize samples, then record
+them through the recorder or caller-validated/admitted registry methods. The SDK
+owns scheduling, HTTP exposition and CPU/memory reporting; the callback must not
+duplicate those responsibilities.
 
 The SDK invokes this callback after launch and every 250 milliseconds,
 independently of scrapes and the readiness/progress loops.
@@ -243,9 +301,11 @@ budget does not bypass validation: only valid labels may fold into overflow.
 
 Rejection scope depends on the integration:
 
-- **Result-file events:** the SDK drops the entire parsed `ShibuyaMetric` without
-  updating any collectors. Latency, status, bytes, and concurrency carried by that
-  event are all discarded. Parser errors also drop the whole event.
+- **Result-file events and the optional recorder:** the shared SDK source-sample
+  path rejects an oversized label before admission or any collector updates.
+  Result-file ingestion drops the complete parsed event, including concurrency;
+  parser errors also drop the whole event. The recorder returns an error and
+  discards every measurement selected in that `RequestSample` or complete event.
 - **Opt-in native folding:** an invalid request label rejects the entire scrape
   with HTTP 502, without consuming admission slots. The SDK does not return a
   partially accepted or cached snapshot.
@@ -282,12 +342,14 @@ for validation and explicit-option precedence.
 The workload inherits `label_limit` when present in the agent environment,
 subject to `Command.Env` overrides. The SDK does not export `LabelsUsageLimit`
 or its default back into that environment.
-Result-file ingestion and opt-in SDK folding permit **at most N request names
-plus one overflow name per agent/run**. In those SDK-managed modes, zero
-permits only overflow. Negative budgets are invalid in every mode.
-Native engines, in-process exporters, and direct registry callers enforce their
-configured limits; recording methods, default proxying, and `MetricsHandler` do
-not enforce them. Explicit `FoldNativeMetrics: true` enables SDK enforcement only
+Result-file ingestion, the optional recorder, and opt-in SDK folding permit
+**at most N request names plus one overflow name per agent/run**. In those
+SDK-managed modes, zero permits only overflow. Negative budgets are invalid in
+every mode. The recorder's independent aggregate-byte labels are not request
+names and remain source-owned.
+Native engines, in-process exporters, and direct low-level registry callers enforce
+their configured limits; registry methods, default proxying, and `MetricsHandler`
+do not enforce them. Explicit `FoldNativeMetrics: true` enables SDK enforcement only
 for URL-backed native engines as a last-resort fallback.
 
 Adapters can share the SDK's admission policy with
@@ -296,12 +358,13 @@ Adapters can share the SDK's admission policy with
 `overflowName` to select it, or `_other_` when that is the producer's convention.
 The configured overflow name is reserved and does not consume a slot.
 
-Create `admitted := make(map[string]struct{})` for each agent/run and use the
-resolved `options.LabelsUsageLimit` as `limit`. Validate the source sample first,
-then use the returned name for all of its request metrics. Serialize access
-alongside collector updates, keep the budget and overflow name fixed, and clear
-the map when resetting the run's metrics. Only admitted names are retained; new
-map keys are cloned so the admission set does not keep entire CSV records alive.
+For integrations not using the recorder, create
+`admitted := make(map[string]struct{})` for each agent/run and use the resolved
+`options.LabelsUsageLimit` as `limit`. Validate the source sample first, then use
+the returned name for all of its request metrics. Serialize access alongside
+collector updates, keep the budget and overflow name fixed, and clear the map
+when resetting the run's metrics. Only admitted names are retained; new map keys
+are cloned so the admission set does not keep entire CSV records alive.
 For an already-admitted name, the helper returns the input string unchanged;
 callers retaining that result own its backing-storage lifetime.
 The helper does not validate samples or aggregate metrics. Native snapshot
@@ -322,8 +385,8 @@ is passed into that callback. The control plane applies its upload policy to the
 returned count. These counts provide early feedback only; they do not predict or
 bound the labels that runtime code will emit.
 
-Result-file ingestion admits names in event order and folds excess names into
-`others`. With native folding enabled, the SDK sorts new names within each successful
+Result-file ingestion and the recorder admit names in serialized sample order and
+fold excess names into `others`. With native folding enabled, the SDK sorts new names within each successful
 scrape before filling remaining slots. Once admitted, a name retains its slot
 for that run, even if it disappears from later scrapes. Rotating names cannot
 reclaim slots. All native request-labelled families use the same mapping, and a
@@ -555,6 +618,7 @@ renaming coarse buckets, summaries, or percentiles.
 - [Registry, in-process handler, and native reverse proxy](http.go)
 - [Native label admission and snapshot folding](metrics_native.go)
 - [Public metric event and producer definitions](metrics.go)
+- [Shared source-sample policy and optional run-scoped recorder](metrics_recorder.go)
 - [Producer histogram regression tests](metrics_producer_test.go)
 - [Replay histogram implementation](https://github.com/reqfleet/replay/blob/main/internal/metrics/metrics.go)
 

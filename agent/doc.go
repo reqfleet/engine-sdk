@@ -83,9 +83,14 @@
 // AddReceivedBytes, and SetConcurrency update independent measurements.
 // ObserveRequest records latency and status together; RecordEvent handles complete
 // events. Omit unavailable measurements rather than fabricating zero values.
-// Direct callers supply identity from RunContext and validate/admit names before
-// recording. There are no global collectors. Reset clears all series; synchronize
-// it with adapter state at the next BeforeStart.
+// Direct low-level callers supply identity from RunContext and validate/admit names
+// before recording. Optional MetricsRecorder owns synchronized request-name
+// validation/admission for one run using the same source-sample policy as result-file
+// ingestion. RequestSample presence flags prevent fabricated measurements.
+// Aggregate received bytes and independent concurrency bypass request admission.
+// Recorder callers still supply identity; the recorder has no run-reset operation.
+// There are no global collectors. Registry Reset clears series, not recorder
+// admission; synchronize low-level resets with adapter state at the next BeforeStart.
 // CustomIngestMetrics lets adapters normalize independent engine samples that
 // do not fit MetricParser's complete-request event model. The SDK runs it after
 // launch and every 250ms, separately from Observe and Progress.
@@ -100,10 +105,11 @@
 // without failing HTTP or the workload. MetricsHandler and MetricsURL never
 // start unused SDK resource collection.
 //
-// Adapters ingesting request samples must validate labels with
-// ShibuyaMetric.LabelIsValid before admission and discard invalid samples without
-// truncation or partial metric updates. The [request-label validation contract]
-// defines whole-event rejection, zero-budget handling, and native scrape behavior.
+// Result-file ingestion and MetricsRecorder validate the original source label with
+// ShibuyaMetric.LabelIsValid before admission and reject invalid samples without
+// truncation or partial updates. Other ingestion adapters must do the same.
+// The [request-label validation contract] defines whole-sample rejection,
+// zero-budget handling, and native scrape behavior.
 //
 // Runtime label admission uses AgentServerOptions.LabelsUsageLimit, not coordinator
 // run messages. LoadAgentServerOptions resolves the lowercase label_limit
@@ -112,7 +118,8 @@
 // Adapters can initialize native exporters from those options before construction.
 // metricschema.AdmitRequestName shares the SDK's bounded, stable admission policy
 // with exporters; metricschema.OverflowRequestName names its reserved "others" series.
-// Exporters own synchronization, validation before admission, and per-run reset.
+// Exporters using that helper directly own synchronization, validation before
+// admission, and per-run reset; MetricsRecorder owns validation/admission locking.
 // The SDK has no tier policy. Workloads inherit label_limit if present; Command.Env may override
 // it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce
 // their own configured limits.

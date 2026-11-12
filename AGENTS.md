@@ -55,6 +55,7 @@ adapter is supplied here.
 | [`agent/runtime_unix.go`](agent/runtime_unix.go), [`agent/runtime_unsupported.go`](agent/runtime_unsupported.go) | Unix runtime startup, process supervision and cleanup; explicit execution rejection on non-Unix systems |
 | [`agent/metrics_collection.go`](agent/metrics_collection.go) | SDK-owned `CustomIngestMetrics` runner, cancellation, and final post-exit ingestion |
 | [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/resource_metrics.go`](agent/resource_metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, per-agent `MetricsRegistry`, independent recording methods, SDK resource sampling, native admission and folding |
+| [`agent/metrics_recorder.go`](agent/metrics_recorder.go) | Optional per-run `MetricsRecorder`, measurement presence, and the shared result-file/recorder validation and admission policy; see the [recorder contract](agent/metrics.md#optional-run-scoped-recorder) |
 | [`protocol`](protocol) | Coordinator messages, explicit run/artifact assignments, lifecycle states, errors, and artifact paths |
 | [`metricschema`](metricschema) | Collector-free metric names, reserved request names, request-name admission, ordered Prometheus labels, and caller-owned histogram boundaries |
 | [`containerstats`](containerstats) | Raw cgroup CPU/memory readers backed by `internal/containerstats`; no rate calculation or run lifecycle policy |

@@ -1,0 +1,145 @@
+package agent
+
+import (
+	"errors"
+	"sync"
+
+	"github.com/reqfleet/engine-sdk/metricschema"
+)
+
+// RequestSample contains the measurements present in one normalized source request
+// sample. Metric supplies the request name, identity, and values. Each Has field
+// selects a measurement, including an explicitly measured zero; unselected values
+// are ignored. Received bytes here must be attributable to this request.
+// Engine-specific normalization and numeric validation remain caller-owned.
+type RequestSample struct {
+	Metric           ShibuyaMetric
+	HasLatency       bool
+	HasStatus        bool
+	HasReceivedBytes bool
+	HasConcurrency   bool
+}
+
+// MetricsRecorder owns request-name admission for one agent/run. Construct it with
+// NewMetricsRecorder; do not copy it. Recording is safe for concurrent use, but
+// multi-family updates are not transactional with respect to HTTP scrapes.
+//
+// Callers still supply assigned identity in each metric. Use one recorder for all
+// request samples in that run, without pre-admitting names. It retains admission
+// and cumulative metrics after completion. It has no run-reset operation;
+// MetricsRegistry.Reset clears the sink, not this recorder's admission state.
+type MetricsRecorder struct {
+	mu       sync.Mutex
+	registry *MetricsRegistry
+	admitted map[string]struct{}
+	limit    int
+}
+
+// NewMetricsRecorder wraps a registry with a fixed, resolved nonnegative request
+// name budget. Pass the same registry to AgentServerOptions.MetricsRegistry.
+// It does not read environment variables, reset the registry, or start workers.
+// Do not share a recorder across runs or use multiple recorders for one run.
+func NewMetricsRecorder(registry *MetricsRegistry, labelLimit int) (*MetricsRecorder, error) {
+	if registry == nil {
+		return nil, errors.New("metrics recorder requires a registry")
+	}
+	if labelLimit < 0 {
+		return nil, errors.New("metrics label limit must be nonnegative")
+	}
+	return &MetricsRecorder{
+		registry: registry,
+		admitted: make(map[string]struct{}),
+		limit:    labelLimit,
+	}, nil
+}
+
+// RecordSample validates the original request label, admits it once, and records
+// only the selected measurements. An invalid label changes neither admission nor
+// any measurements, including concurrency carried by this sample. Latency uses
+// the ordinary histogram, even for llm_resp. A concurrency-only sample consumes
+// no request-name slot. Use SetConcurrency for independent concurrency instead.
+func (r *MetricsRecorder) RecordSample(sample RequestSample) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return recordRequestSample(r.registry, r.admitted, r.limit, sample, false)
+}
+
+// RecordEvent records a complete event using the same policy as result-file
+// ingestion, including case-insensitive llm_resp routing after name admission.
+// Use RecordSample when any of latency, status, bytes, or concurrency is absent.
+func (r *MetricsRecorder) RecordEvent(metric ShibuyaMetric) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return recordRequestSample(r.registry, r.admitted, r.limit, completeRequestSample(metric), true)
+}
+
+// AddAggregateReceivedBytes records independently measured bytes under the source's
+// aggregate label unchanged, without request-name admission or invented requests.
+// The label must satisfy LabelIsValid. Use RecordSample with HasReceivedBytes for
+// bytes attributed to a request. Keep aggregate labels bounded at the source.
+func (r *MetricsRecorder) AddAggregateReceivedBytes(metric ShibuyaMetric) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := metric.LabelIsValid(); err != nil {
+		return err
+	}
+	r.registry.AddReceivedBytes(metric)
+	return nil
+}
+
+// SetConcurrency records an independent concurrency measurement. Metric.Label is
+// ignored: concurrency has no request-name dimension and consumes no budget.
+func (r *MetricsRecorder) SetConcurrency(metric ShibuyaMetric) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registry.SetConcurrency(metric)
+}
+
+func completeRequestSample(metric ShibuyaMetric) RequestSample {
+	return RequestSample{
+		Metric:           metric,
+		HasLatency:       true,
+		HasStatus:        true,
+		HasReceivedBytes: true,
+		HasConcurrency:   true,
+	}
+}
+
+// recordRequestSample is the shared result-file/recorder source-sample boundary.
+// The caller serializes access to admitted and its lifetime. Hold the registry
+// lock across validation, admission, and all updates so Reset cannot split them.
+// Native folding remains a whole-snapshot operation, not an event producer.
+func recordRequestSample(
+	registry *MetricsRegistry,
+	admitted map[string]struct{},
+	limit int,
+	sample RequestSample,
+	eventLatency bool,
+) error {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	metric := sample.Metric
+	if _, err := metric.LabelIsValid(); err != nil {
+		return err
+	}
+	if sample.HasLatency || sample.HasStatus || sample.HasReceivedBytes {
+		metric.Label = metricschema.AdmitRequestName(metric.Label, admitted, limit, "")
+	}
+	if sample.HasLatency {
+		histogram := registry.labelLatencyHistogram
+		if eventLatency {
+			histogram = registry.latencyHistogramForLabel(metric.Label)
+		}
+		registry.observeLatency(metric, histogram)
+	}
+	if sample.HasStatus {
+		registry.recordStatus(metric)
+	}
+	if sample.HasReceivedBytes {
+		registry.addReceivedBytes(metric)
+	}
+	if sample.HasConcurrency {
+		registry.setConcurrency(metric)
+	}
+	return nil
+}
