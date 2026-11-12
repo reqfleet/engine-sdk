@@ -30,11 +30,11 @@ func TestResourceMetricsOmitUnavailableRatesAndPreserveRunIdentity(t *testing.T)
 		}
 		return result
 	}
-	memoryOnly := resources.Sample{MemoryBytes: 8192, MemoryValid: true}
+	memoryOnly := resources.Sample{MemoryBytes: 8192}
 	server.publishResourceMetrics("first", memoryOnly)
 	assert.NotContains(t, gather(), metricschema.CPUGauge)
 	server.publishResourceMetrics("first", resources.Sample{
-		CPUCores: 0.5, CPUValid: true, MemoryBytes: 8192, MemoryValid: true,
+		CPUCores: 0.5, CPUValid: true, MemoryBytes: 8192,
 	})
 	all := gather()
 	require.Contains(t, all, metricschema.CPUGauge)
@@ -55,6 +55,4 @@ func TestResourceMetricsOmitUnavailableRatesAndPreserveRunIdentity(t *testing.T)
 	require.Len(t, all[metricschema.MemoryGauge].Metric, 2, "retain the completed run's memory")
 	server.publishResourceMetrics("first", memoryOnly)
 	assert.NotContains(t, gather(), metricschema.CPUGauge, "a counter decrease must remove the stale rate")
-	server.publishResourceMetrics("second", resources.Sample{})
-	require.Len(t, gather()[metricschema.MemoryGauge].Metric, 1, "failed memory must not retain a stale value")
 }

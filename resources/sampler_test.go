@@ -29,7 +29,7 @@ func TestSamplerUsesElapsedTimeAndReportsMemoryBeforeCPU(t *testing.T) {
 	sampler, source := newTestSampler()
 	sample, err := sampler.Sample()
 	require.NoError(t, err)
-	assert.Equal(t, Sample{MemoryBytes: 8192, MemoryValid: true}, sample)
+	assert.Equal(t, Sample{MemoryBytes: 8192}, sample)
 
 	for _, step := range []struct {
 		elapsed time.Duration
@@ -45,7 +45,7 @@ func TestSamplerUsesElapsedTimeAndReportsMemoryBeforeCPU(t *testing.T) {
 		source.at = source.at.Add(step.elapsed)
 		sample, err = sampler.Sample()
 		require.NoError(t, err)
-		assert.Equal(t, Sample{CPUCores: step.cores, CPUValid: true, MemoryBytes: 8192, MemoryValid: true}, sample)
+		assert.Equal(t, Sample{CPUCores: step.cores, CPUValid: true, MemoryBytes: 8192}, sample)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestSamplerRebaselinesOnResetAndCounterDecrease(t *testing.T) {
 			sample, err = sampler.Sample()
 			require.NoError(t, err)
 			assert.False(t, sample.CPUValid)
-			assert.True(t, sample.MemoryValid)
+			assert.Equal(t, uint64(8192), sample.MemoryBytes)
 			source.cpu += 250_000
 			source.at = source.at.Add(500 * time.Millisecond)
 			sample, err = sampler.Sample()
@@ -82,7 +82,7 @@ func TestSamplerRebaselinesOnResetAndCounterDecrease(t *testing.T) {
 	}
 }
 
-func TestSamplerReadFailuresPreserveBaselineAndPartialMemory(t *testing.T) {
+func TestSamplerReadFailuresDiscardSampleAndPreserveBaseline(t *testing.T) {
 	cpuFailure, memoryFailure := errors.New("CPU inaccessible"), errors.New("memory malformed")
 	for _, failure := range []struct {
 		name              string
@@ -90,7 +90,6 @@ func TestSamplerReadFailuresPreserveBaselineAndPartialMemory(t *testing.T) {
 	}{
 		{"CPU", cpuFailure, nil},
 		{"memory", nil, memoryFailure},
-		{"both", cpuFailure, memoryFailure},
 	} {
 		for _, initial := range []bool{true, false} {
 			t.Run(failure.name+"/initial="+strconv.FormatBool(initial), func(t *testing.T) {
@@ -113,16 +112,12 @@ func TestSamplerReadFailuresPreserveBaselineAndPartialMemory(t *testing.T) {
 					assert.ErrorIs(t, err, memoryFailure)
 					assert.Contains(t, err.Error(), "memory usage")
 				}
-				assert.False(t, sample.CPUValid)
-				assert.Equal(t, failure.memoryErr == nil, sample.MemoryValid)
-				if sample.MemoryValid {
-					assert.Equal(t, uint64(8192), sample.MemoryBytes)
-				}
+				assert.Equal(t, Sample{}, sample, "failed attempts must not expose partial measurements")
 				source.cpuErr, source.memoryErr = nil, nil
 				source.at = source.at.Add(time.Second)
 				sample, err = sampler.Sample()
 				require.NoError(t, err)
-				assert.True(t, sample.MemoryValid)
+				assert.Equal(t, uint64(8192), sample.MemoryBytes)
 				assert.Equal(t, !initial, sample.CPUValid)
 				if !initial {
 					assert.Equal(t, 0.5, sample.CPUCores, "recovery uses the last successful baseline")
@@ -143,9 +138,7 @@ func TestSamplerRejectsNonpositiveTimeWithoutAdvancingBaseline(t *testing.T) {
 			source.at = baseline.Add(elapsed)
 			sample, err := sampler.Sample()
 			require.ErrorContains(t, err, "interval must be positive")
-			assert.False(t, sample.CPUValid)
-			assert.Equal(t, uint64(8192), sample.MemoryBytes)
-			assert.True(t, sample.MemoryValid)
+			assert.Equal(t, Sample{}, sample)
 			source.at = baseline.Add(2 * time.Second)
 			sample, err = sampler.Sample()
 			require.NoError(t, err)

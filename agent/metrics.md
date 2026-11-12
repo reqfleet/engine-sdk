@@ -386,25 +386,26 @@ Use a zero-valued `resources.Sampler` and call `Sample()` to obtain a
   A decreasing counter establishes a new baseline and omits CPU for that sample,
   without unsigned underflow. Nonpositive elapsed time returns an error and does
   not advance the baseline.
-- Both resources are read on every call. If either read fails, CPU is unavailable
-  and its baseline is unchanged. Errors identify and wrap each failing resource,
-  including both errors when both reads fail. The next successful CPU rate spans
-  from the last successful baseline, not the failed attempt.
-- `MemoryBytes` is independently reportable whenever `MemoryValid` is true,
-  including on the first sample, counter decrease, or a CPU error.
+- Sampling stops at the first read error, which identifies the resource and wraps
+  the underlying error. Any sampling error returns a zero `Sample` and leaves the
+  CPU baseline unchanged. Callers must discard the entire sample without
+  publishing it. The next successful CPU rate spans from the last successful
+  baseline, not the failed attempt.
+- On success, `MemoryBytes` is always reportable, including on the first sample
+  and after a counter decrease when `CPUValid` is false.
 - Call `Reset()` at each run boundary; it discards the CPU baseline. The runtime
   does this before sampling a different active run.
 
-False validity flags mean unavailable, not zero. Omit invalid resource series,
-including any previously published CPU rate after a counter decrease; do not
-present stale rates as new measurements. The runtime publishes valid fields and
-retains its existing fatal resource-error policy. Complete-exposition exporters
-may fail a scrape on a sampling error; k6 does so rather than serve partial metrics.
+`CPUValid: false` on a successful sample means unavailable, not zero. Omit CPU,
+including any previously published rate after a counter decrease; do not present
+stale rates as new measurements. Always check the sampling error before updating
+any resource gauges. The runtime retains its existing fatal resource-error policy;
+k6 fails the scrape rather than publishing measurements from a failed attempt.
 
 `Sample` and `Reset` are synchronized; do not copy a sampler after first use.
 The sampler starts no workers and owns no Prometheus collectors. Exporters own
 scrape scheduling, shutdown, and serialization of run identity, reset and
-publication. Publish valid `CPUCores` and `MemoryBytes` as `metricschema.CPUGauge`
+publication. Publish successful `CPUCores` (when `CPUValid`) and `MemoryBytes` as `metricschema.CPUGauge`
 and `metricschema.MemoryGauge`, with `metricschema.ResourceLabels` from resolved
 `EngineMeta` and the current `RunContext.RunID`. Sampling does not automatically
 add resource families to a `MetricsHandler` or `MetricsURL` response.

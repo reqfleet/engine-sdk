@@ -87,7 +87,7 @@ Custom exporters can reuse the public
 [`resources.Sampler`](resources/sampler.go) to sample Linux cgroup CPU
 cores and memory bytes without importing the agent runtime or Prometheus. The SDK
 runtime uses the same sampler, including elapsed-time calculation, run reset and
-partial availability semantics. See the
+error semantics. See the
 [resource metrics contract](agent/metrics.md#runtime-resource-metrics) for units
 and exporter ownership. The sampler API is unreleased; pin a development revision
 or a published release containing it before importing it.

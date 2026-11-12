@@ -240,10 +240,10 @@ func (as *AgentServer) reportOwnMetrics(interval time.Duration) error {
 			sampledRunID = runID
 		}
 		sample, err := sampler.Sample()
-		as.publishResourceMetrics(runID, sample)
 		if err != nil {
 			return err
 		}
+		as.publishResourceMetrics(runID, sample)
 	}
 }
 
@@ -255,11 +255,7 @@ func (as *AgentServer) publishResourceMetrics(runID string, sample resources.Sam
 		// A rebaseline must not leave an earlier rate looking like a current sample.
 		cpuGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
 	}
-	if sample.MemoryValid {
-		memGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(float64(sample.MemoryBytes))
-	} else {
-		memGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
-	}
+	memGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(float64(sample.MemoryBytes))
 }
 
 func (as *AgentServer) SubscribeToCoordinator() (chan protocol.Message, error) {
