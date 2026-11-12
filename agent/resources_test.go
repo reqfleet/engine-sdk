@@ -22,7 +22,6 @@ import (
 
 type resourceSampleResult struct {
 	sample  resources.Sample
-	ok      bool
 	err     error
 	release <-chan struct{}
 }
@@ -36,7 +35,7 @@ type fakeResourceSampler struct {
 	entered chan int
 }
 
-func (s *fakeResourceSampler) Sample() (resources.Sample, bool, error) {
+func (s *fakeResourceSampler) Sample() (resources.Sample, error) {
 	s.mu.Lock()
 	s.calls++
 	call := s.calls
@@ -52,7 +51,7 @@ func (s *fakeResourceSampler) Sample() (resources.Sample, bool, error) {
 	if result.release != nil {
 		<-result.release
 	}
-	return result.sample, result.ok, result.err
+	return result.sample, result.err
 }
 
 func (s *fakeResourceSampler) Reset() {
@@ -84,10 +83,10 @@ func TestResourceMetricsOmitUnavailableRatesAndPreserveRunIdentity(t *testing.T)
 	server := NewAgentServer(AgentServerOptions{EngineMeta: meta})
 	registry := server.MetricsRegistry()
 	sampler := &fakeResourceSampler{results: []resourceSampleResult{
-		{sample: resources.Sample{MemoryBytes: 4096}},
-		{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}, ok: true},
-		{}, // A counter decrease invalidates both previously published values.
-		{ok: true},
+		{err: resources.ErrSampleUnavailable},
+		{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}},
+		{err: resources.ErrSampleUnavailable}, // A counter decrease invalidates both published values.
+		{},
 	}}
 	registry.resources.sampler = sampler
 	handler := server.metricsHandler()
@@ -156,9 +155,9 @@ func TestResourceMetricsSampleWithoutScrapesAndStopOnCancellation(t *testing.T) 
 		server := NewAgentServer(AgentServerOptions{})
 		registry := server.MetricsRegistry()
 		sampler := &fakeResourceSampler{results: []resourceSampleResult{
-			{},
-			{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}, ok: true},
-			{sample: resources.Sample{CPUCores: 99, MemoryBytes: 999}, ok: true},
+			{err: resources.ErrSampleUnavailable},
+			{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}},
+			{sample: resources.Sample{CPUCores: 99, MemoryBytes: 999}},
 		}}
 		registry.resources.sampler = sampler
 		server.startMetricsRun("run")
@@ -202,10 +201,13 @@ func TestResourceMetricsErrorsSkipUpdatesAndRecover(t *testing.T) {
 				registry := server.MetricsRegistry()
 				sampleErr := errors.New("resource read failed")
 				sampler := &fakeResourceSampler{results: []resourceSampleResult{
-					{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}, ok: published},
-					{sample: resources.Sample{CPUCores: 99, MemoryBytes: 999}, ok: true, err: sampleErr},
-					{sample: resources.Sample{CPUCores: 0.75, MemoryBytes: 16384}, ok: true},
+					{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}},
+					{sample: resources.Sample{CPUCores: 99, MemoryBytes: 999}, err: sampleErr},
+					{sample: resources.Sample{CPUCores: 0.75, MemoryBytes: 16384}},
 				}}
+				if !published {
+					sampler.results[0] = resourceSampleResult{err: resources.ErrSampleUnavailable}
+				}
 				registry.resources.sampler = sampler
 				server.startMetricsRun("run")
 				registry.RecordEvent(ShibuyaMetric{RunID: "run", Label: "checkout", Status: "200", Latency: 1})
@@ -251,7 +253,7 @@ func TestResourceMetricsCancellationJoinsInFlightSample(t *testing.T) {
 		registry := server.MetricsRegistry()
 		release := make(chan struct{})
 		sampler := &fakeResourceSampler{
-			results: []resourceSampleResult{{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}, ok: true, release: release}},
+			results: []resourceSampleResult{{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}, release: release}},
 			entered: make(chan int, 1),
 		}
 		registry.resources.sampler = sampler
@@ -313,11 +315,11 @@ func TestResourceMetricsRetainCompletedRun(t *testing.T) {
 			defer releaseOnce.Do(func() { close(release) })
 			want := resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}
 			sampler := &fakeResourceSampler{
-				results: []resourceSampleResult{{release: release}, {sample: want, ok: true}},
+				results: []resourceSampleResult{{err: resources.ErrSampleUnavailable, release: release}, {sample: want}},
 				entered: make(chan int, 4),
 			}
 			if failed {
-				sampler.results[0].sample, sampler.results[0].ok = want, true
+				sampler.results[0].sample, sampler.results[0].err = want, nil
 				sampler.results[1] = resourceSampleResult{err: errors.New("final resource read failed")}
 			}
 			registry := fixture.server.MetricsRegistry()
@@ -383,10 +385,10 @@ func TestResourceMetricsAreIsolatedBetweenAgents(t *testing.T) {
 	first := NewAgentServer(AgentServerOptions{})
 	second := NewAgentServer(AgentServerOptions{})
 	first.MetricsRegistry().resources.sampler = &fakeResourceSampler{results: []resourceSampleResult{
-		{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}, ok: true},
+		{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}},
 	}}
 	second.MetricsRegistry().resources.sampler = &fakeResourceSampler{results: []resourceSampleResult{
-		{sample: resources.Sample{CPUCores: 0.75, MemoryBytes: 16384}, ok: true},
+		{sample: resources.Sample{CPUCores: 0.75, MemoryBytes: 16384}},
 	}}
 	first.startMetricsRun("shared-run")
 	second.startMetricsRun("shared-run")

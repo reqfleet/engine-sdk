@@ -441,8 +441,8 @@ runtime. They start no workers, register no collectors, and require no coordinat
 Missing, unreadable, or malformed files return errors, not successful zero samples.
 
 Use a zero-valued `resources.Sampler` and call `Sample()` to obtain
-`(sample resources.Sample, ok bool, err error)`. A sample contains only CPU cores
-and memory bytes; there are no per-resource validity flags. The sampler implements
+`(resources.Sample, error)`. A sample contains only CPU cores and memory bytes;
+there are no validity flags. The sampler implements
 these rules:
 
 - `CPUCores` is the cumulative CPU microsecond delta divided by actual elapsed
@@ -450,26 +450,27 @@ these rules:
   come from Go's monotonic `time.Now`; the configured polling interval is not the
   denominator. An unchanged successful counter produces a genuine zero rate.
 - The first successful read, including a zero CPU counter, establishes a baseline
-  and returns `ok=false` with no error and a zero sample. A decreasing counter
-  re-establishes that baseline the same way, without unsigned underflow. Both CPU
-  and memory are skipped for that attempt. Nonpositive elapsed time returns an
-  error and does not advance the baseline.
+  and returns `resources.ErrSampleUnavailable` with a zero sample. A decreasing
+  counter re-establishes that baseline the same way, without unsigned underflow.
+  Both CPU and memory are skipped for that attempt. Nonpositive elapsed time
+  returns a different error and does not advance the baseline.
 - Sampling stops at the first read error, which identifies the resource and wraps
-  the underlying error. Any sampling error returns a zero `Sample`, `ok=false`,
-  and leaves the CPU baseline unchanged. Callers must discard the entire sample
-  without publishing it. The next complete sample spans from the last successful
-  baseline, not the failed attempt.
-- When `ok` is true and the error is nil, both `CPUCores` and `MemoryBytes` are
-  reportable, including genuine zero usage.
+  the underlying error. Read failures return a zero `Sample` and leave the CPU
+  baseline unchanged. Callers must discard the entire sample without publishing
+  it. The next complete sample spans from the last successful baseline, not the
+  failed attempt.
+- A nil error means both `CPUCores` and `MemoryBytes` are reportable, including
+  genuine zero usage.
 - Call `Reset()` at each run boundary; it discards the CPU baseline. The SDK
   resets automatically on successful launch; adapters using its registry do not
   manage the sampler.
 
-An unavailable sample (`ok=false`, no error) is not a zero-usage measurement.
-Omit both resource series, including previous values after a counter decrease;
-do not present stale values as a new sample. Always check the error before updating
-any gauges. A resource read error logs a warning and skips that update; last-good
-values remain unchanged. It does not fail scrapes or terminate the workload.
+`errors.Is(err, resources.ErrSampleUnavailable)` identifies an expected baseline
+attempt, not a zero-usage measurement. Omit both resource series, including
+previous values after a counter decrease, without logging a warning. Do not
+present stale values as a new sample. Always check the error before updating
+gauges. Other sampling errors log a warning and skip the update; last-good
+values remain unchanged. They do not fail scrapes or terminate the workload.
 The next sampling attempt can recover using the last successful baseline.
 
 `Sample` and `Reset` are synchronized; do not copy a sampler after first use.

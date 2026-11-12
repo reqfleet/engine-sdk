@@ -2,13 +2,14 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/reqfleet/engine-sdk/resources"
 )
 
 type resourceSampler interface {
-	Sample() (resources.Sample, bool, error)
+	Sample() (resources.Sample, error)
 	Reset()
 }
 
@@ -37,17 +38,6 @@ func (m *MetricsRegistry) startResourceRun(meta EngineMeta, runID string) {
 	m.collectionErr = nil
 }
 
-// publishResourceMetrics runs under the registry read lock.
-func (m *MetricsRegistry) publishResourceMetrics(meta EngineMeta, runID string, sample resources.Sample, ok bool) {
-	if !ok {
-		m.cpuGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
-		m.memGauge.DeleteLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID)
-		return
-	}
-	m.cpuGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(sample.CPUCores)
-	m.memGauge.WithLabelValues(meta.CollectionID, meta.PlanID, runID, meta.Zone, meta.EngineID).Set(float64(sample.MemoryBytes))
-}
-
 // sampleResources has one live caller per run; the final call follows worker shutdown.
 func (m *MetricsRegistry) sampleResources() error {
 	m.mu.RLock()
@@ -56,11 +46,17 @@ func (m *MetricsRegistry) sampleResources() error {
 	if r.runID == "" {
 		return nil
 	}
-	sample, ok, err := r.sampler.Sample()
+	sample, err := r.sampler.Sample()
+	if errors.Is(err, resources.ErrSampleUnavailable) {
+		m.cpuGauge.DeleteLabelValues(r.meta.CollectionID, r.meta.PlanID, r.runID, r.meta.Zone, r.meta.EngineID)
+		m.memGauge.DeleteLabelValues(r.meta.CollectionID, r.meta.PlanID, r.runID, r.meta.Zone, r.meta.EngineID)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	m.publishResourceMetrics(r.meta, r.runID, sample, ok)
+	m.cpuGauge.WithLabelValues(r.meta.CollectionID, r.meta.PlanID, r.runID, r.meta.Zone, r.meta.EngineID).Set(sample.CPUCores)
+	m.memGauge.WithLabelValues(r.meta.CollectionID, r.meta.PlanID, r.runID, r.meta.Zone, r.meta.EngineID).Set(float64(sample.MemoryBytes))
 	return nil
 }
 
