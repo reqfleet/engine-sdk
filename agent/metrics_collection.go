@@ -8,7 +8,9 @@ import (
 	"github.com/reqfleet/engine-sdk/protocol"
 )
 
-func (as *AgentServer) reportMetrics(ctx context.Context, run *agentRun) {
+// customIngesterRunner runs adapter-owned ingestion until cancellation. Final
+// draining happens separately after the caller joins this loop.
+func (as *AgentServer) customIngesterRunner(ctx context.Context, run *agentRun) {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {

@@ -98,7 +98,7 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 		monitors.Go(func() { as.reportOwnMetrics(monitorCtx, 5*time.Second) })
 	}
 	if as.options.CustomIngestMetrics != nil {
-		monitors.Go(func() { as.reportMetrics(monitorCtx, run) })
+		monitors.Go(func() { as.customIngesterRunner(monitorCtx, run) })
 	}
 	if as.options.Observe != nil {
 		monitors.Go(func() { as.observeRun(monitorCtx, run) })
