@@ -39,8 +39,8 @@ func (sm ShibuyaMetric) LabelIsValid() (bool, error) {
 
 // MetricsRegistry owns the canonical reporting collectors for one agent.
 // Construct it with NewMetricsRegistry; the zero value is not usable.
-// Callers supply run identity and validate source samples and admit request
-// labels before updating metrics. All methods are safe for concurrent use.
+// Use MetricsRecorder to record adapter samples. The registry exposes gathering
+// and collector reset, not public recording methods. All methods are concurrency-safe.
 type MetricsRegistry struct {
 	mu                           sync.RWMutex
 	registry                     *prometheus.Registry
@@ -102,61 +102,8 @@ func NewMetricsRegistry() *MetricsRegistry {
 	return r
 }
 
-// ObserveLatency records only metric.Latency, in milliseconds. Like ObserveRequest,
-// it uses the ordinary latency histogram even when the label is "llm_resp".
-func (r *MetricsRegistry) ObserveLatency(metric ShibuyaMetric) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	r.observeLatency(metric, r.labelLatencyHistogram)
-}
-
-// RecordStatus increments only the counter for metric.Status by one.
-func (r *MetricsRegistry) RecordStatus(metric ShibuyaMetric) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	r.recordStatus(metric)
-}
-
-// ObserveRequest records only the request's latency and status. Every request
-// uses the ordinary latency histogram, even when its label is "llm_resp".
-func (r *MetricsRegistry) ObserveRequest(metric ShibuyaMetric) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	r.observeRequest(metric, r.labelLatencyHistogram)
-}
-
-// AddReceivedBytes adds only the received bytes in metric.EgressBytes.
-func (r *MetricsRegistry) AddReceivedBytes(metric ShibuyaMetric) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	r.addReceivedBytes(metric)
-}
-
-// SetConcurrency sets only the current concurrency in metric.Threads.
-func (r *MetricsRegistry) SetConcurrency(metric ShibuyaMetric) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	r.setConcurrency(metric)
-}
-
-// RecordEvent records latency, status, received bytes, and concurrency together
-// with respect to Reset. Unlike ObserveRequest, it preserves parser event routing:
-// labels equal to "llm_resp" (case-insensitive) use the LLM latency histogram.
-// It does not make concurrent scrapes atomic with updates.
-func (r *MetricsRegistry) RecordEvent(metric ShibuyaMetric) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	r.observeRequest(metric, r.latencyHistogramForLabel(metric.Label))
-	r.addReceivedBytes(metric)
-	r.setConcurrency(metric)
-}
-
-// Recording helpers use the caller's lock so RecordEvent can update every
-// collector together with respect to Reset, without nested locking.
-func (r *MetricsRegistry) observeRequest(sm ShibuyaMetric, histogram *prometheus.HistogramVec) {
-	r.observeLatency(sm, histogram)
-	r.recordStatus(sm)
-}
+// Recording helpers require the caller to hold mu so a sample's updates cannot
+// be split by Reset. Prometheus synchronizes individual collector updates.
 
 func (r *MetricsRegistry) observeLatency(sm ShibuyaMetric, histogram *prometheus.HistogramVec) {
 	histogram.WithLabelValues(sm.CollectionID, sm.Label, sm.RunID, sm.EngineID, sm.PlanID, sm.Zone).Observe(sm.Latency)

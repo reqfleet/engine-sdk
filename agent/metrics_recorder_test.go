@@ -155,6 +155,70 @@ func TestMetricsRecorderMeasurementPresence(t *testing.T) {
 	}
 }
 
+func TestMetricsRecorderNamedMeasurements(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		record func(*MetricsRecorder, ShibuyaMetric) error
+		want   []string
+	}{
+		{"latency", (*MetricsRecorder).ObserveLatency, []string{metricschema.RequestLatency}},
+		{"status", (*MetricsRecorder).RecordStatus, []string{metricschema.StatusCounter}},
+		{"request", (*MetricsRecorder).ObserveRequest, []string{metricschema.RequestLatency, metricschema.StatusCounter}},
+		{"bytes", (*MetricsRecorder).AddReceivedBytes, []string{metricschema.EgressBytesCounter}},
+	} {
+		for _, budget := range []int{0, 1} {
+			for _, populated := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/budget-%d/populated-%t", test.name, budget, populated), func(t *testing.T) {
+					registry := NewMetricsRegistry()
+					recorder, err := NewMetricsRecorder(registry, budget)
+					require.NoError(t, err)
+					metric := ShibuyaMetric{Label: "llm_resp", Status: "204", Latency: 8, EgressBytes: 12, Threads: 3}
+					invalid := metric
+					invalid.Label = strings.Repeat("x", 1024)
+					require.Error(t, test.record(recorder, invalid))
+					require.Empty(t, gatherCanonicalMetrics(t, registry))
+
+					count, latencySum := float64(1), float64(0)
+					if populated {
+						require.NoError(t, recorder.RecordSample(completeRequestSample(metric)))
+						count, latencySum = 2, 8
+					}
+					before := gatherCanonicalMetrics(t, registry)
+					metric.Latency, metric.Threads = 0, 999
+					require.NoError(t, test.record(recorder, metric))
+					after := gatherCanonicalMetrics(t, registry)
+					require.Error(t, test.record(recorder, invalid))
+					assert.Equal(t, after, gatherCanonicalMetrics(t, registry), "invalid samples must change no family")
+
+					label := "llm_resp"
+					if budget == 0 {
+						label = "others"
+					}
+					for _, family := range test.want {
+						require.Contains(t, after, family)
+						require.Len(t, after[family].Metric, 1)
+						recorded := after[family].Metric[0]
+						assert.Equal(t, label, nativeLabelValue(recorded, "label"), "invalid names must not consume slots")
+						switch family {
+						case metricschema.RequestLatency:
+							assert.Equal(t, uint64(count), recorded.GetHistogram().GetSampleCount())
+							assert.Equal(t, latencySum, recorded.GetHistogram().GetSampleSum())
+						case metricschema.StatusCounter:
+							assert.Equal(t, count, recorded.GetCounter().GetValue())
+							assert.Equal(t, "204", nativeLabelValue(recorded, "status"))
+						case metricschema.EgressBytesCounter:
+							assert.Equal(t, count*12, recorded.GetCounter().GetValue())
+						}
+						delete(before, family)
+						delete(after, family)
+					}
+					assert.Equal(t, before, after, "unselected families must not be created or changed")
+				})
+			}
+		}
+	}
+}
+
 func TestMetricsRecorderSharedAdmissionAndIndependentSamples(t *testing.T) {
 	registry := NewMetricsRegistry()
 	recorder, err := NewMetricsRecorder(registry, 1)
@@ -170,15 +234,12 @@ func TestMetricsRecorderSharedAdmissionAndIndependentSamples(t *testing.T) {
 	require.NoError(t, recorder.AddAggregateReceivedBytes(ShibuyaMetric{Label: "aggregate", EgressBytes: 40}))
 	invalid.Threads = 8
 	recorder.SetConcurrency(invalid) // This independent measurement has no request label.
-	require.NoError(t, recorder.RecordSample(RequestSample{
-		Metric: ShibuyaMetric{Label: "kept", Latency: 5}, HasLatency: true,
-	}))
+	require.NoError(t, recorder.ObserveLatency(ShibuyaMetric{Label: "kept", Latency: 5}))
 	require.NoError(t, recorder.RecordSample(RequestSample{
 		Metric: ShibuyaMetric{Label: "excess", Status: "500", EgressBytes: 20}, HasStatus: true, HasReceivedBytes: true,
 	}))
-	require.NoError(t, recorder.RecordSample(RequestSample{
-		Metric: ShibuyaMetric{Label: "kept", Status: "200"}, HasStatus: true,
-	}))
+	require.NoError(t, recorder.RecordStatus(ShibuyaMetric{Label: "kept", Status: "200"}))
+	require.NoError(t, recorder.AddReceivedBytes(ShibuyaMetric{Label: "bytes-only", EgressBytes: 10}))
 	before := gatherCanonicalMetrics(t, registry)
 	require.Error(t, recorder.RecordSample(completeRequestSample(invalid)))
 	assert.Equal(t, before, gatherCanonicalMetrics(t, registry))
@@ -190,7 +251,7 @@ func TestMetricsRecorderSharedAdmissionAndIndependentSamples(t *testing.T) {
 	assert.Equal(t, float64(5), latency.Metric[0].GetHistogram().GetSampleSum())
 	for name, want := range map[string]map[string]float64{
 		metricschema.StatusCounter:      {"kept": 1, "others": 1},
-		metricschema.EgressBytesCounter: {"aggregate": 40, "others": 20},
+		metricschema.EgressBytesCounter: {"aggregate": 40, "others": 30},
 	} {
 		got := make(map[string]float64)
 		for _, metric := range before[name].Metric {
@@ -227,7 +288,9 @@ func TestMetricsRecorderConcurrentAdmission(t *testing.T) {
 		workers.Go(func() {
 			for range 50 {
 				metric := ShibuyaMetric{Label: label, Status: "200", Latency: 2, EgressBytes: 10, Threads: 7}
-				assert.NoError(t, recorder.RecordSample(completeRequestSample(metric)))
+				assert.NoError(t, recorder.ObserveRequest(metric))
+				assert.NoError(t, recorder.AddReceivedBytes(metric))
+				recorder.SetConcurrency(metric)
 				assert.NoError(t, recorder.RecordEvent(metric))
 				_, err := registry.Gather()
 				assert.NoError(t, err)

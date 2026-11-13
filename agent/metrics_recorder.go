@@ -64,6 +64,31 @@ func (r *MetricsRecorder) RecordSample(sample RequestSample) error {
 	return recordRequestSample(r.registry, r.admitted, r.limit, sample, false)
 }
 
+// ObserveLatency records only metric.Latency, in milliseconds, after request-name
+// validation and admission. It uses the ordinary histogram even for llm_resp.
+func (r *MetricsRecorder) ObserveLatency(metric ShibuyaMetric) error {
+	return r.RecordSample(RequestSample{Metric: metric, HasLatency: true})
+}
+
+// RecordStatus increments only metric.Status's counter after request-name
+// validation and admission; it does not fabricate a latency observation.
+func (r *MetricsRecorder) RecordStatus(metric ShibuyaMetric) error {
+	return r.RecordSample(RequestSample{Metric: metric, HasStatus: true})
+}
+
+// ObserveRequest records latency and status together after one request-name
+// validation and admission decision. Latency uses the ordinary histogram.
+func (r *MetricsRecorder) ObserveRequest(metric ShibuyaMetric) error {
+	return r.RecordSample(RequestSample{Metric: metric, HasLatency: true, HasStatus: true})
+}
+
+// AddReceivedBytes adds only metric.EgressBytes attributed to this request, after
+// request-name validation and admission. Use AddAggregateReceivedBytes for
+// independently reported bytes that must retain their aggregate attribution.
+func (r *MetricsRecorder) AddReceivedBytes(metric ShibuyaMetric) error {
+	return r.RecordSample(RequestSample{Metric: metric, HasReceivedBytes: true})
+}
+
 // RecordEvent records a complete event using the same policy as result-file
 // ingestion, including case-insensitive llm_resp routing after name admission.
 // Use RecordSample when any of latency, status, bytes, or concurrency is absent.
@@ -75,15 +100,17 @@ func (r *MetricsRecorder) RecordEvent(metric ShibuyaMetric) error {
 
 // AddAggregateReceivedBytes records independently measured bytes under the source's
 // aggregate label unchanged, without request-name admission or invented requests.
-// The label must satisfy LabelIsValid. Use RecordSample with HasReceivedBytes for
-// bytes attributed to a request. Keep aggregate labels bounded at the source.
+// The label must satisfy LabelIsValid. Use AddReceivedBytes for bytes attributed
+// to a request. Keep aggregate labels bounded at the source.
 func (r *MetricsRecorder) AddAggregateReceivedBytes(metric ShibuyaMetric) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.registry.mu.RLock()
+	defer r.registry.mu.RUnlock()
 	if _, err := metric.LabelIsValid(); err != nil {
 		return err
 	}
-	r.registry.AddReceivedBytes(metric)
+	r.registry.addReceivedBytes(metric)
 	return nil
 }
 
@@ -92,7 +119,9 @@ func (r *MetricsRecorder) AddAggregateReceivedBytes(metric ShibuyaMetric) error 
 func (r *MetricsRecorder) SetConcurrency(metric ShibuyaMetric) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.registry.SetConcurrency(metric)
+	r.registry.mu.RLock()
+	defer r.registry.mu.RUnlock()
+	r.registry.setConcurrency(metric)
 }
 
 func completeRequestSample(metric ShibuyaMetric) RequestSample {

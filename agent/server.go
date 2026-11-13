@@ -349,12 +349,12 @@ type AgentServerOptions struct {
 	// Do not share one registry between servers.
 	MetricsRegistry *MetricsRegistry
 	// CustomIngestMetrics is for adapters that normalize engine output themselves
-	// and record samples in the SDK-owned MetricsRegistry.
+	// and record samples through a MetricsRecorder into the SDK-owned registry.
 	//
 	// Use it when MetricParser's complete-request event model does not fit.
 	// For example, k6 CSV emits separate request-duration, received-byte and
-	// concurrency samples. The adapter reads new records, validates and admits
-	// samples, and updates the corresponding SDK metrics.
+	// concurrency samples. The adapter reads and normalizes new records; the
+	// recorder validates and admits request names, then updates selected measurements.
 	//
 	// The SDK owns scheduling, HTTP exposition and CPU/memory reporting.
 	// This callback must not implement those responsibilities.

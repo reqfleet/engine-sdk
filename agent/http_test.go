@@ -114,11 +114,13 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 
 func TestMetricsHandlerUsesRegistry(t *testing.T) {
 	registry := NewMetricsRegistry()
-	as := NewAgentServer(AgentServerOptions{MetricsRegistry: registry})
-	registry.RecordEvent(ShibuyaMetric{
+	recorder, err := NewMetricsRecorder(registry, 1)
+	require.NoError(t, err)
+	as := NewAgentServer(AgentServerOptions{MetricsRegistry: registry, LabelsUsageLimit: 1})
+	require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
 		CollectionID: "collection", PlanID: "plan", RunID: "run", EngineID: "engine", Zone: "zone",
 		Label: "checkout", Status: "200", Latency: 250, EgressBytes: 1024, Threads: 7,
-	})
+	}))
 	families := nativeScrape(t, as.metricsHandler())
 	require.Len(t, families, 4)
 	assert.Equal(t, map[string]float64{"checkout/200": 1}, nativeCounters(families["shibuya_status_counter"]))

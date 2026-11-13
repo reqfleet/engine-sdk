@@ -54,8 +54,8 @@ adapter is supplied here.
 | [`agent/lifecycle.go`](agent/lifecycle.go) | SDK-owned preparation, lifecycle state, observations, and cancellation |
 | [`agent/runtime_unix.go`](agent/runtime_unix.go), [`agent/runtime_unsupported.go`](agent/runtime_unsupported.go) | Unix runtime startup, process supervision and cleanup; explicit execution rejection on non-Unix systems |
 | [`agent/metrics_collection.go`](agent/metrics_collection.go) | SDK-owned `CustomIngestMetrics` runner, cancellation, and final post-exit ingestion |
-| [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/resource_metrics.go`](agent/resource_metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, per-agent `MetricsRegistry`, independent recording methods, SDK resource sampling, native admission and folding |
-| [`agent/metrics_recorder.go`](agent/metrics_recorder.go) | Optional per-run `MetricsRecorder`, measurement presence, and the shared result-file/recorder validation and admission policy; see the [recorder contract](agent/metrics.md#optional-run-scoped-recorder) |
+| [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/resource_metrics.go`](agent/resource_metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, per-agent `MetricsRegistry`, SDK resource sampling, native admission and folding |
+| [`agent/metrics_recorder.go`](agent/metrics_recorder.go) | Per-run `MetricsRecorder`, the public recording API with measurement presence and the shared result-file/recorder validation and admission policy; see the [recorder contract](agent/metrics.md#run-scoped-recorder) |
 | [`protocol`](protocol) | Coordinator messages, explicit run/artifact assignments, lifecycle states, errors, and artifact paths |
 | [`metricschema`](metricschema) | Collector-free metric names, reserved request names, request-name admission, ordered Prometheus labels, and caller-owned histogram boundaries |
 | [`containerstats`](containerstats) | Raw cgroup CPU/memory readers backed by `internal/containerstats`; no rate calculation or run lifecycle policy |
@@ -160,14 +160,15 @@ needed. An existing normalized `http.Handler` can be assigned directly to
 `options.MetricsHandler`; do not wrap it in another server or `MetricsURL`.
 
 For adapters that parse engine samples themselves, prefer SDK-owned collectors:
-create `agent.NewMetricsRegistry()`, pass it to the adapter and
-`options.MetricsRegistry`, and set `options.CustomIngestMetrics` to the adapter's
-ingestion callback. Leave `MetricParser`, `MetricsHandler`, and native options unset.
-Use independent recording methods rather than defining collectors or reporting
-CPU/memory. Collection runs independently of scrapes, with a final post-exit call
-before workspace reuse. Call `registry.Reset()` with parser/admission reset in
-`BeforeStart`, under the adapter state lock. See
-[the recording and lifecycle contract](agent/metrics.md#sdk-owned-registry).
+create `agent.NewMetricsRegistry()` and pass it to `options.MetricsRegistry`.
+Create a `MetricsRecorder` with that registry and the resolved
+`options.LabelsUsageLimit`; pass the recorder to the adapter and set
+`options.CustomIngestMetrics` to its ingestion callback. Leave `MetricParser`,
+`MetricsHandler`, and native options unset. Use recorder methods rather than
+defining collectors or reporting CPU/memory. Collection runs independently of
+scrapes, with a final post-exit call before workspace reuse. The registry has no
+public recording methods, and its `Reset` is not a recorder run transition.
+See [the recording and lifecycle contract](agent/metrics.md#sdk-owned-registry).
 
 ## Implement an adapter
 
@@ -304,13 +305,17 @@ one of these modes:
   `EgressBytes`, and current concurrency into `Threads`. The runtime supplies
   run identity and accumulates metrics; parser errors drop the event. Never
   feed cumulative snapshots into a per-request event parser.
-- **Direct SDK registry updates:** supply a `MetricsRegistry` and optionally
-  `CustomIngestMetrics`; leave parser and native options unset. Translate validated,
-  admitted samples into `ObserveRequest`, `AddReceivedBytes`, or `SetConcurrency`.
-  `RecordEvent` is only for complete request events. The SDK defines collectors,
-  runs a background resource sampler, and serves stored values. The collection
-  callback owns engine-output draining, not resource sampling or HTTP exposition.
-  `ResultFile` may name ordinary output when using the collection callback.
+- **SDK recorder updates:** supply a `MetricsRegistry` and optionally
+  `CustomIngestMetrics`; leave parser and native options unset. Normalize samples
+  and use a `MetricsRecorder` configured with the resolved budget. Its
+  `ObserveLatency`, `RecordStatus`, `ObserveRequest`, and `AddReceivedBytes`
+  methods validate/admit request names; `SetConcurrency` is independent.
+  Use `AddAggregateReceivedBytes` for source-specific aggregate bytes, and
+  `RecordSample` for other multi-measurement combinations. `RecordEvent` is only
+  for complete request events. The SDK defines collectors, runs a background
+  resource sampler, and serves stored values. The collection callback owns
+  engine-output draining, not resource sampling or HTTP exposition. `ResultFile`
+  may name ordinary output when using the collection callback.
 - **In-process normalized handler:** set `MetricsHandler` to the adapter's
   `http.Handler` and `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`; leave
   `MetricParser` nil and `MetricsURL` empty. The SDK invokes it directly at the
@@ -342,14 +347,14 @@ the control plane interprets the returned count and owns policy decisions.
 
 Separately, `AgentServerOptions.LabelsUsageLimit` configures runtime admission in
 the agent; it is not a coordinator run assignment or an input to preflight counting.
-Result-file ingestion and opt-in SDK folding permit N named request labels plus
-one overflow label per agent/run for a nonnegative budget N; zero folds all names
-in these SDK-managed modes. Default native proxying and in-process handlers do
-not enforce this budget; consult the metrics contract for configuration and
-engine-specific limit semantics.
-Direct registry recording does not perform admission again: validate source
-samples and use `metricschema.AdmitRequestName` with the resolved budget before
-recording. Source-specific aggregate byte labels must preserve their attribution.
+Result-file ingestion, recorder request samples, and opt-in SDK folding permit
+N named request labels plus one overflow label per agent/run for a nonnegative
+budget N; zero folds all names in these SDK-managed modes. Default native proxying
+and in-process handlers do not enforce this budget; consult the metrics contract
+for configuration and engine-specific limit semantics.
+Use recorder methods without pre-admitting source request names. Source-specific
+aggregate byte labels must preserve their attribution via
+`AddAggregateReceivedBytes`; they remain outside the request-name budget.
 
 With SDK native folding enabled, names keep their slots across scrapes, with
 deterministic admission of new names within a scrape. Rejected scrapes do not
