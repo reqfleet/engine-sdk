@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/reqfleet/engine-sdk/metricschema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,6 +65,7 @@ func eventPolicyProducer(t *testing.T, source string, budget int) (*MetricsRegis
 	registry := NewMetricsRegistry()
 	recorder, err := NewMetricsRecorder(registry, budget)
 	require.NoError(t, err)
+	recorder.Reset(RunContext{RunID: "run"})
 	return registry, func(metric ShibuyaMetric) {
 		t.Helper()
 		err := recorder.RecordEvent(metric)
@@ -123,6 +125,7 @@ func TestMetricsRecorderMeasurementPresence(t *testing.T) {
 			registry := NewMetricsRegistry()
 			recorder, err := NewMetricsRecorder(registry, 0)
 			require.NoError(t, err)
+			recorder.Reset(RunContext{})
 			sample := test.sample
 			sample.Metric = ShibuyaMetric{Label: "llm_resp", Status: "204", Latency: 0, EgressBytes: 12, Threads: 3}
 			require.NoError(t, recorder.RecordSample(sample))
@@ -172,6 +175,7 @@ func TestMetricsRecorderNamedMeasurements(t *testing.T) {
 					registry := NewMetricsRegistry()
 					recorder, err := NewMetricsRecorder(registry, budget)
 					require.NoError(t, err)
+					recorder.Reset(RunContext{})
 					metric := ShibuyaMetric{Label: "llm_resp", Status: "204", Latency: 8, EgressBytes: 12, Threads: 3}
 					invalid := metric
 					invalid.Label = strings.Repeat("x", 1024)
@@ -223,6 +227,7 @@ func TestMetricsRecorderSharedAdmissionAndIndependentSamples(t *testing.T) {
 	registry := NewMetricsRegistry()
 	recorder, err := NewMetricsRecorder(registry, 1)
 	require.NoError(t, err)
+	recorder.Reset(RunContext{})
 	invalid := ShibuyaMetric{Label: strings.Repeat("x", 1024), Latency: 999, EgressBytes: 999, Threads: 999}
 	require.Error(t, recorder.RecordSample(completeRequestSample(invalid)))
 	require.Error(t, recorder.AddAggregateReceivedBytes(invalid))
@@ -269,6 +274,7 @@ func TestMetricsRecorderInstances(t *testing.T) {
 		registry := NewMetricsRegistry()
 		recorder, err := NewMetricsRecorder(registry, 1)
 		require.NoError(t, err)
+		recorder.Reset(RunContext{RunID: firstName})
 		for _, name := range []string{firstName, "excess", firstName} {
 			require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
 				Label: name, RunID: firstName, Status: "200", Latency: 2, EgressBytes: 10, Threads: 7,
@@ -282,6 +288,7 @@ func TestMetricsRecorderConcurrentAdmission(t *testing.T) {
 	registry := NewMetricsRegistry()
 	recorder, err := NewMetricsRecorder(registry, 1)
 	require.NoError(t, err)
+	recorder.Reset(RunContext{})
 	require.NoError(t, recorder.RecordEvent(ShibuyaMetric{Label: "kept", Status: "200", Latency: 2, EgressBytes: 10, Threads: 7}))
 	var workers sync.WaitGroup
 	for _, label := range []string{"kept", "a", "b", "others"} {
@@ -324,6 +331,7 @@ func TestRequestSamplePolicyHistogramRouting(t *testing.T) {
 	registry := NewMetricsRegistry()
 	recorder, err := NewMetricsRecorder(registry, 1)
 	require.NoError(t, err)
+	recorder.Reset(RunContext{})
 	require.NoError(t, recorder.RecordSample(RequestSample{
 		Metric: ShibuyaMetric{Label: "llm_resp", Latency: 4500}, HasLatency: true,
 	}))
@@ -340,4 +348,192 @@ func TestNewMetricsRecorderRejectsInvalidConfiguration(t *testing.T) {
 	recorder, err = NewMetricsRecorder(NewMetricsRegistry(), -1)
 	require.Error(t, err)
 	assert.Nil(t, recorder)
+}
+
+func TestMetricsRecorderBoundIdentity(t *testing.T) {
+	for _, run := range []struct {
+		name string
+		run  RunContext
+	}{
+		{
+			name: "assigned",
+			run: RunContext{
+				CollectionID: "assigned-collection", PlanID: "assigned-plan", RunID: "assigned-run",
+				AgentID: "assigned-engine", Zone: "assigned-zone",
+			},
+		},
+		{name: "blank", run: RunContext{}},
+		{name: "partially blank", run: RunContext{RunID: "assigned-run", AgentID: "assigned-engine"}},
+	} {
+		for _, entry := range []struct {
+			name   string
+			label  string
+			record func(*MetricsRecorder, ShibuyaMetric) error
+			want   []string
+		}{
+			{
+				name: "sample", label: "llm_resp",
+				record: func(recorder *MetricsRecorder, metric ShibuyaMetric) error {
+					return recorder.RecordSample(RequestSample{
+						Metric: metric, HasLatency: true, HasStatus: true,
+						HasReceivedBytes: true, HasConcurrency: true,
+					})
+				},
+				want: []string{
+					metricschema.RequestLatency, metricschema.StatusCounter,
+					metricschema.EgressBytesCounter, metricschema.ThreadsGauge,
+				},
+			},
+			{
+				name: "concurrency-only sample", label: "request",
+				record: func(recorder *MetricsRecorder, metric ShibuyaMetric) error {
+					return recorder.RecordSample(RequestSample{Metric: metric, HasConcurrency: true})
+				},
+				want: []string{metricschema.ThreadsGauge},
+			},
+			{
+				name: "request event", label: "request", record: (*MetricsRecorder).RecordEvent,
+				want: []string{
+					metricschema.RequestLatency, metricschema.StatusCounter,
+					metricschema.EgressBytesCounter, metricschema.ThreadsGauge,
+				},
+			},
+			{
+				name: "LLM event", label: "LLM_RESP", record: (*MetricsRecorder).RecordEvent,
+				want: []string{
+					metricschema.LLMResponseLatency, metricschema.StatusCounter,
+					metricschema.EgressBytesCounter, metricschema.ThreadsGauge,
+				},
+			},
+			{
+				name: "TTFT event", label: "ttft", record: (*MetricsRecorder).RecordEvent,
+				want: []string{
+					metricschema.RequestLatency, metricschema.StatusCounter,
+					metricschema.EgressBytesCounter, metricschema.ThreadsGauge,
+				},
+			},
+			{
+				name: "latency", label: "llm_resp", record: (*MetricsRecorder).ObserveLatency,
+				want: []string{metricschema.RequestLatency},
+			},
+			{
+				name: "status", label: "request", record: (*MetricsRecorder).RecordStatus,
+				want: []string{metricschema.StatusCounter},
+			},
+			{
+				name: "request", label: "llm_resp", record: (*MetricsRecorder).ObserveRequest,
+				want: []string{metricschema.RequestLatency, metricschema.StatusCounter},
+			},
+			{
+				name: "request bytes", label: "request", record: (*MetricsRecorder).AddReceivedBytes,
+				want: []string{metricschema.EgressBytesCounter},
+			},
+			{
+				name: "aggregate bytes", label: "aggregate", record: (*MetricsRecorder).AddAggregateReceivedBytes,
+				want: []string{metricschema.EgressBytesCounter},
+			},
+			{
+				name: "concurrency", label: "ignored",
+				record: func(recorder *MetricsRecorder, metric ShibuyaMetric) error {
+					recorder.SetConcurrency(metric)
+					return nil
+				},
+				want: []string{metricschema.ThreadsGauge},
+			},
+		} {
+			t.Run(run.name+"/"+entry.name, func(t *testing.T) {
+				registry := NewMetricsRegistry()
+				recorder, err := NewMetricsRecorder(registry, 1)
+				require.NoError(t, err)
+				recorder.Reset(run.run)
+				for _, source := range []ShibuyaMetric{
+					{},
+					{
+						CollectionID: "source-collection", PlanID: "source-plan", RunID: "source-run",
+						EngineID: "source-engine", Zone: "source-zone",
+					},
+				} {
+					source.Label, source.Status = entry.label, "201"
+					source.Latency, source.EgressBytes, source.Threads = 11, 13, 7
+					require.NoError(t, entry.record(recorder, source))
+				}
+
+				server := NewAgentServer(AgentServerOptions{MetricsRegistry: registry, LabelsUsageLimit: 1})
+				families := nativeScrape(t, server.metricsHandler())
+				require.Len(t, families, len(entry.want), "source identity must not create additional families")
+				for _, name := range entry.want {
+					require.Contains(t, families, name)
+					require.Len(t, families[name].Metric, 1, "source identities must coalesce into the assigned series")
+					metric := families[name].Metric[0]
+					extra := map[string]string{}
+					if name != metricschema.ThreadsGauge {
+						extra["label"] = entry.label
+					}
+					switch name {
+					case metricschema.RequestLatency, metricschema.LLMResponseLatency:
+						assert.Equal(t, uint64(2), metric.GetHistogram().GetSampleCount())
+						assert.Equal(t, float64(22), metric.GetHistogram().GetSampleSum())
+					case metricschema.StatusCounter:
+						extra["status"] = "201"
+						assert.Equal(t, float64(2), metric.GetCounter().GetValue())
+					case metricschema.EgressBytesCounter:
+						assert.Equal(t, float64(26), metric.GetCounter().GetValue())
+					case metricschema.ThreadsGauge:
+						assert.Equal(t, float64(7), metric.GetGauge().GetValue())
+					}
+					assertRecorderMetricLabels(t, metric, run.run, extra)
+				}
+			})
+		}
+	}
+}
+
+func TestRequestSamplePolicyBoundIdentity(t *testing.T) {
+	for _, source := range []string{"recorder", "result-file"} {
+		t.Run(source, func(t *testing.T) {
+			registry, emit := eventPolicyProducer(t, source, 1)
+			for _, metric := range []ShibuyaMetric{
+				{},
+				{
+					CollectionID: "source-collection", PlanID: "source-plan", RunID: "source-run",
+					EngineID: "source-engine", Zone: "source-zone",
+				},
+			} {
+				metric.Label, metric.Status = "request", "200"
+				metric.Latency, metric.EgressBytes, metric.Threads = 2, 10, 7
+				emit(metric)
+			}
+			assertCompleteSampleTotals(t, registry, map[string]float64{"request": 2}, 2, 10, 7)
+			for name, family := range gatherCanonicalMetrics(t, registry) {
+				require.Len(t, family.Metric, 1)
+				extra := map[string]string{}
+				if name != metricschema.ThreadsGauge {
+					extra["label"] = "request"
+				}
+				if name == metricschema.StatusCounter {
+					extra["status"] = "200"
+				}
+				assertRecorderMetricLabels(t, family.Metric[0], RunContext{RunID: "run"}, extra)
+			}
+		})
+	}
+}
+
+func assertRecorderMetricLabels(t *testing.T, metric *dto.Metric, run RunContext, extra map[string]string) {
+	t.Helper()
+	want := map[string]string{
+		"collection_id": run.CollectionID,
+		"plan_id":       run.PlanID,
+		"run_id":        run.RunID,
+		"engine_no":     run.AgentID,
+		"zone":          run.Zone,
+	}
+	for name, value := range extra {
+		want[name] = value
+	}
+	got := make(map[string]string, len(metric.Label))
+	for _, label := range metric.Label {
+		got[label.GetName()] = label.GetValue()
+	}
+	assert.Equal(t, want, got)
 }

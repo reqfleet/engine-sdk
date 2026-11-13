@@ -129,9 +129,17 @@ func (r *MetricsRegistry) latencyHistogramForLabel(label string) *prometheus.His
 }
 
 // Reset clears every metric series, collection failure, and resource baseline.
+// It does not change recorder identity or admission; use MetricsRecorder.Reset
+// for a recorder run transition, after quiescing previous-run ingestion.
 func (r *MetricsRegistry) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.reset()
+}
+
+// reset requires the exclusive registry lock so recorder state can transition
+// with collectors without exposing a partially reset snapshot.
+func (r *MetricsRegistry) reset() {
 	r.labelLatencyHistogram.Reset()
 	r.labelLLMRespLatencyHistogram.Reset()
 	r.statusCounter.Reset()

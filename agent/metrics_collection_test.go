@@ -27,17 +27,32 @@ func TestMetricsCollectionJoinsAndDrainsFinalOutputBeforeRelease(t *testing.T) {
 	entered, canceled := make(chan struct{}), make(chan struct{})
 	liveRelease, finalEntered, finalRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
+	nextRecorded := false // Live and final ingestion are serialized.
 	marker := filepath.Join(t.TempDir(), "exit")
 	f := newAgentFixture(t, AgentServerOptions{
 		MetricsRegistry:  registry,
 		LabelsUsageLimit: 1,
 		ResultFile:       "results.csv",
+		BeforeStart: func(_ context.Context, run RunContext) error {
+			recorder.Reset(run)
+			return nil
+		},
 		BuildCommand: func(_ context.Context, run RunContext) (Command, error) {
+			if run.RunID == "next" {
+				return Command{Command: "true"}, nil
+			}
 			return Command{Command: "sh", Args: []string{
 				"-c", `while [ ! -f "$1" ]; do sleep 0.01; done; printf '12.5' > "$2"`, "sh", marker, run.ResultFile,
 			}}, nil
 		},
 		CustomIngestMetrics: func(ctx context.Context, run RunContext) error {
+			if run.RunID == "next" {
+				if nextRecorded {
+					return nil
+				}
+				nextRecorded = true
+				return recorder.ObserveRequest(ShibuyaMetric{Label: "next-request", Status: "201", Latency: 7})
+			}
 			if calls.Add(1) == 1 {
 				close(entered)
 				<-ctx.Done()
@@ -97,6 +112,17 @@ func TestMetricsCollectionJoinsAndDrainsFinalOutputBeforeRelease(t *testing.T) {
 		assert.Equal(t, "first", nativeLabelValue(families[metricschema.RequestLatency].Metric[0], "run_id"))
 	}
 	assert.Equal(t, int32(2), calls.Load(), "scraping must not collect or duplicate the final row")
+	f.send(runMessage(protocol.VerbStart, "next", ""))
+	waitRunState(t, f, "next", protocol.RunCompleted)
+	families := nativeScrape(t, f.server.metricsHandler())
+	require.Contains(t, families, metricschema.RequestLatency)
+	require.Len(t, families[metricschema.RequestLatency].Metric, 1)
+	metric := families[metricschema.RequestLatency].Metric[0]
+	assert.Equal(t, "next", nativeLabelValue(metric, "run_id"))
+	assert.Equal(t, "next-request", nativeLabelValue(metric, "label"), "the same recorder has a fresh name budget")
+	assert.Equal(t, uint64(1), metric.GetHistogram().GetSampleCount())
+	assert.Equal(t, 7.0, metric.GetHistogram().GetSampleSum())
+	assert.Equal(t, map[string]float64{"next-request/201": 1}, nativeCounters(families[metricschema.StatusCounter]))
 }
 
 func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
@@ -113,7 +139,8 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			registry := NewMetricsRegistry()
-			var recorder *MetricsRecorder
+			recorder, err := NewMetricsRecorder(registry, 1)
+			require.NoError(t, err)
 			failure := errors.New("invalid engine output")
 			if test.deadline {
 				failure = context.DeadlineExceeded
@@ -123,12 +150,10 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 			f := newAgentFixture(t, AgentServerOptions{
 				MetricsRegistry:  registry,
 				LabelsUsageLimit: 1,
-				BeforeStart: func(context.Context, RunContext) error {
-					registry.Reset()
+				BeforeStart: func(_ context.Context, run RunContext) error {
+					recorder.Reset(run)
 					recorded = false
-					var err error
-					recorder, err = NewMetricsRecorder(registry, 1)
-					return err
+					return nil
 				},
 				BuildCommand: func(_ context.Context, run RunContext) (Command, error) {
 					if run.RunID == "bad" && (!test.final || test.stop) {
@@ -178,7 +203,7 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 			if test.stop {
 				assert.Equal(t, protocol.StopCompleted, status.StopReason)
 			}
-			_, err := registry.Gather()
+			_, err = registry.Gather()
 			require.ErrorIs(t, err, failure)
 			response := nativeResponse(f.server.metricsHandler())
 			assert.Equal(t, http.StatusInternalServerError, response.Code)

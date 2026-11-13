@@ -178,14 +178,8 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 		return
 	}
 
-	em := as.options.EngineMeta
-	metric.CollectionID = em.CollectionID
-	metric.PlanID = em.PlanID
-	metric.EngineID = em.EngineID
-	metric.RunID = event.runID
-	metric.Zone = em.Zone
-
-	if err := recordRequestSample(as.metrics, labels, as.labelsUsageLimit, completeRequestSample(metric), true); err != nil {
+	identity := identityFromMeta(as.options.EngineMeta, event.runID)
+	if err := recordRequestSample(as.metrics, labels, as.labelsUsageLimit, &identity, completeRequestSample(metric), true); err != nil {
 		log.Error(err)
 	}
 }
