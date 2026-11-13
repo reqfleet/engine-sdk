@@ -174,17 +174,10 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 
 	metricParser := as.options.MetricParser
 	metric, err := metricParser(event.line)
-	// we need to pass the engine meta(project, collection, plan), especially run id
-	// Run id is generated at controller side
 	if err != nil {
 		return
 	}
 
-	if _, err := metric.LabelIsValid(); err != nil {
-		log.Error(err)
-		return
-	}
-	metric.Label = metricschema.AdmitRequestName(metric.Label, labels, as.labelsUsageLimit, "")
 	em := as.options.EngineMeta
 	metric.CollectionID = em.CollectionID
 	metric.PlanID = em.PlanID
@@ -192,7 +185,9 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 	metric.RunID = event.runID
 	metric.Zone = em.Zone
 
-	as.metrics.RecordEvent(metric)
+	if err := recordRequestSample(as.metrics, labels, as.labelsUsageLimit, completeRequestSample(metric), true); err != nil {
+		log.Error(err)
+	}
 }
 
 func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
@@ -354,12 +349,12 @@ type AgentServerOptions struct {
 	// Do not share one registry between servers.
 	MetricsRegistry *MetricsRegistry
 	// CustomIngestMetrics is for adapters that normalize engine output themselves
-	// and record samples in the SDK-owned MetricsRegistry.
+	// and record samples through a MetricsRecorder into the SDK-owned registry.
 	//
 	// Use it when MetricParser's complete-request event model does not fit.
 	// For example, k6 CSV emits separate request-duration, received-byte and
-	// concurrency samples. The adapter reads new records, validates and admits
-	// samples, and updates the corresponding SDK metrics.
+	// concurrency samples. The adapter reads and normalizes new records; the
+	// recorder validates and admits request names, then updates selected measurements.
 	//
 	// The SDK owns scheduling, HTTP exposition and CPU/memory reporting.
 	// This callback must not implement those responsibilities.

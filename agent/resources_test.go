@@ -197,8 +197,10 @@ func TestResourceMetricsErrorsSkipUpdatesAndRecover(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				logger, hook := logtest.NewNullLogger()
-				server := NewAgentServer(AgentServerOptions{Logger: log.NewEntry(logger)})
+				server := NewAgentServer(AgentServerOptions{Logger: log.NewEntry(logger), LabelsUsageLimit: 1})
 				registry := server.MetricsRegistry()
+				recorder, err := NewMetricsRecorder(registry, 1)
+				require.NoError(t, err)
 				sampleErr := errors.New("resource read failed")
 				sampler := &fakeResourceSampler{results: []resourceSampleResult{
 					{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}},
@@ -210,7 +212,7 @@ func TestResourceMetricsErrorsSkipUpdatesAndRecover(t *testing.T) {
 				}
 				registry.resources.sampler = sampler
 				server.startMetricsRun("run")
-				registry.RecordEvent(ShibuyaMetric{RunID: "run", Label: "checkout", Status: "200", Latency: 1})
+				require.NoError(t, recorder.RecordEvent(ShibuyaMetric{RunID: "run", Label: "checkout", Status: "200", Latency: 1}))
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				done := make(chan struct{})

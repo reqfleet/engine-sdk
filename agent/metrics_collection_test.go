@@ -22,13 +22,16 @@ import (
 
 func TestMetricsCollectionJoinsAndDrainsFinalOutputBeforeRelease(t *testing.T) {
 	registry := NewMetricsRegistry()
+	recorder, err := NewMetricsRecorder(registry, 1)
+	require.NoError(t, err)
 	entered, canceled := make(chan struct{}), make(chan struct{})
 	liveRelease, finalEntered, finalRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
 	marker := filepath.Join(t.TempDir(), "exit")
 	f := newAgentFixture(t, AgentServerOptions{
-		MetricsRegistry: registry,
-		ResultFile:      "results.csv",
+		MetricsRegistry:  registry,
+		LabelsUsageLimit: 1,
+		ResultFile:       "results.csv",
 		BuildCommand: func(_ context.Context, run RunContext) (Command, error) {
 			return Command{Command: "sh", Args: []string{
 				"-c", `while [ ! -f "$1" ]; do sleep 0.01; done; printf '12.5' > "$2"`, "sh", marker, run.ResultFile,
@@ -58,8 +61,7 @@ func TestMetricsCollectionJoinsAndDrainsFinalOutputBeforeRelease(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			registry.ObserveRequest(ShibuyaMetric{RunID: run.RunID, Label: "last", Status: "200", Latency: latency})
-			return nil
+			return recorder.ObserveRequest(ShibuyaMetric{RunID: run.RunID, Label: "last", Status: "200", Latency: latency})
 		},
 	}, nil)
 	releaseLive := sync.OnceFunc(func() { close(liveRelease) })
@@ -111,6 +113,7 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			registry := NewMetricsRegistry()
+			var recorder *MetricsRecorder
 			failure := errors.New("invalid engine output")
 			if test.deadline {
 				failure = context.DeadlineExceeded
@@ -118,11 +121,14 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 			liveEntered := make(chan struct{})
 			recorded := false // Live and final collection must be serialized.
 			f := newAgentFixture(t, AgentServerOptions{
-				MetricsRegistry: registry,
+				MetricsRegistry:  registry,
+				LabelsUsageLimit: 1,
 				BeforeStart: func(context.Context, RunContext) error {
 					registry.Reset()
 					recorded = false
-					return nil
+					var err error
+					recorder, err = NewMetricsRecorder(registry, 1)
+					return err
 				},
 				BuildCommand: func(_ context.Context, run RunContext) (Command, error) {
 					if run.RunID == "bad" && (!test.final || test.stop) {
@@ -140,7 +146,9 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 							}
 							return nil
 						}
-						registry.ObserveRequest(ShibuyaMetric{RunID: run.RunID, Label: "partial", Status: "200", Latency: 1})
+						if err := recorder.ObserveRequest(ShibuyaMetric{RunID: run.RunID, Label: "partial", Status: "200", Latency: 1}); err != nil {
+							return err
+						}
 						if test.deadline {
 							<-ctx.Done()
 							return nil
@@ -148,7 +156,9 @@ func TestMetricsCollectionFailureFailsRunAndRecoversOnNextRun(t *testing.T) {
 						return failure
 					}
 					if !recorded {
-						registry.ObserveRequest(ShibuyaMetric{RunID: run.RunID, Label: "complete", Status: "201", Latency: 5})
+						if err := recorder.ObserveRequest(ShibuyaMetric{RunID: run.RunID, Label: "complete", Status: "201", Latency: 5}); err != nil {
+							return err
+						}
 						recorded = true
 					}
 					return nil
