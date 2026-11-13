@@ -68,7 +68,7 @@ adapter is supplied here.
 ## Development environment
 
 Use the Go version declared in [go.mod](go.mod) for the checkout you are changing
-(currently Go 1.26.9). Run commands from this repository's root with `GOWORK=off`
+(currently Go 1.26.10). Run commands from this repository's root with `GOWORK=off`
 to check the public module independently of any surrounding workspace:
 
 ```sh

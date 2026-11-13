@@ -1,6 +1,6 @@
 module github.com/reqfleet/engine-sdk
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/hpcloud/tail v1.0.0
