@@ -77,8 +77,8 @@ observe run status.
 
 ## Build and dependency boundary
 
-Use Go 1.26.10. From `examples/preparing-adapter` (or a copy of this example
-directory), run:
+Use the Go version declared in [go.mod](go.mod). From `examples/preparing-adapter`
+(or a copy of this example directory), run:
 
 ```sh
 GOWORK=off go build ./...
@@ -94,8 +94,9 @@ This is a separate Go module pinned to the released SDK, not to the parent
 checkout. Root-level `go test ./...` does not include this module. No local
 `replace` or workspace is needed.
 
-With Go 1.26.10, Make, and a running Docker daemon, run both the SDK race tests
-and this Docker conformance harness from the repository root:
+With the Go version declared in the repository root's [go.mod](../../go.mod),
+Make, and a running Docker daemon, run both the SDK race tests and this Docker
+conformance harness from the repository root:
 
 ```sh
 make test
@@ -112,7 +113,7 @@ its ephemeral-CA HTTPS artifact server to `127.0.0.1:443`, a TLS command peer on
 `:2416`, the SDK HTTP server on `:8080`, and an actual HTTP workload target on
 `:18080`. Do not publish ports or mount host directories. The image runs the
 preparation unit tests, then builds the adapter and integration-tagged test
-binary with Go 1.26.10 and `CGO_ENABLED=0`. It installs curl and CA certificates
+binary with `CGO_ENABLED=0`. It installs curl and CA certificates
 in a Debian runtime. Its exact entrypoint is:
 
 ```sh
