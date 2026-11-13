@@ -116,9 +116,13 @@ func TestMetricsHandlerUsesRegistry(t *testing.T) {
 	registry := NewMetricsRegistry()
 	recorder, err := NewMetricsRecorder(registry, 1)
 	require.NoError(t, err)
+	run := RunContext{
+		CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
+	}
+	recorder.Reset(run)
 	as := NewAgentServer(AgentServerOptions{MetricsRegistry: registry, LabelsUsageLimit: 1})
 	require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
-		CollectionID: "collection", PlanID: "plan", RunID: "run", EngineID: "engine", Zone: "zone",
+		CollectionID: "source", PlanID: "source", RunID: "source", EngineID: "source", Zone: "source",
 		Label: "checkout", Status: "200", Latency: 250, EgressBytes: 1024, Threads: 7,
 	}))
 	families := nativeScrape(t, as.metricsHandler())
@@ -129,6 +133,17 @@ func TestMetricsHandlerUsesRegistry(t *testing.T) {
 	histogram := families["shibuya_latency_label_milliseconds"].Metric[0].GetHistogram()
 	assert.Equal(t, uint64(1), histogram.GetSampleCount())
 	assert.Equal(t, float64(250), histogram.GetSampleSum())
+	for name, family := range families {
+		require.Len(t, family.Metric, 1)
+		extra := map[string]string{}
+		if name != "shibuya_threads_gauge" {
+			extra["label"] = "checkout"
+		}
+		if name == "shibuya_status_counter" {
+			extra["status"] = "200"
+		}
+		assertRecorderMetricLabels(t, family.Metric[0], run, extra)
+	}
 
 	other := NewAgentServer(AgentServerOptions{})
 	assert.Empty(t, nativeScrape(t, other.metricsHandler()), "a second server must not expose the supplied registry")

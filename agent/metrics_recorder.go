@@ -8,10 +8,11 @@ import (
 )
 
 // RequestSample contains the measurements present in one normalized source request
-// sample. Metric supplies the request name, identity, and values. Each Has field
-// selects a measurement, including an explicitly measured zero; unselected values
-// are ignored. Received bytes here must be attributable to this request.
+// sample. Metric supplies the request name and values; its identity is ignored.
+// Received bytes here must be attributable to this request.
 // Engine-specific normalization and numeric validation remain caller-owned.
+// Each Has field selects a measurement, including an explicitly measured zero;
+// unselected values are ignored.
 type RequestSample struct {
 	Metric           ShibuyaMetric
 	HasLatency       bool
@@ -20,25 +21,26 @@ type RequestSample struct {
 	HasConcurrency   bool
 }
 
-// MetricsRecorder owns request-name admission for one agent/run. Construct it with
-// NewMetricsRecorder; do not copy it. Recording is safe for concurrent use, but
-// multi-family updates are not transactional with respect to HTTP scrapes.
+// MetricsRecorder owns assigned identity and request-name admission for one
+// agent/run. Construct it with NewMetricsRecorder; do not copy it. Recording is
+// safe for concurrent use, but multi-family updates are not transactional with
+// respect to HTTP scrapes.
 //
-// Callers still supply assigned identity in each metric. Use one recorder for all
-// request samples in that run, without pre-admitting names. It retains admission
-// and cumulative metrics after completion. It has no run-reset operation;
-// MetricsRegistry.Reset clears the sink, not this recorder's admission state.
+// Call Reset with the assigned RunContext before first ingestion and each new
+// run. Source identity is always ignored. Completed-run identity, admission, and
+// cumulative metrics remain available until that explicit transition.
 type MetricsRecorder struct {
 	mu       sync.Mutex
 	registry *MetricsRegistry
 	admitted map[string]struct{}
 	limit    int
+	identity metricIdentity
 }
 
 // NewMetricsRecorder wraps a registry with a fixed, resolved nonnegative request
 // name budget. Pass the same registry to AgentServerOptions.MetricsRegistry.
 // It does not read environment variables, reset the registry, or start workers.
-// Do not share a recorder across runs or use multiple recorders for one run.
+// Use one recorder per registry; call Reset before recording the first run.
 func NewMetricsRecorder(registry *MetricsRegistry, labelLimit int) (*MetricsRecorder, error) {
 	if registry == nil {
 		return nil, errors.New("metrics recorder requires a registry")
@@ -53,6 +55,27 @@ func NewMetricsRecorder(registry *MetricsRegistry, labelLimit int) (*MetricsReco
 	}, nil
 }
 
+// Reset clears the previous run and binds the next assigned identity in one
+// transition synchronized with recording, resource sampling, and gathering.
+// It clears all collectors, request-name admission, collection errors, and the
+// resource baseline, without changing the configured label budget.
+//
+// Callers choose the transition time, after final scrapes and after quiescing
+// prior-run ingestion and callbacks. Reset does not cancel work: a late sample
+// would be attributed to the newly bound run. It copies only identity strings
+// from run, without validating them or retaining settings or artifacts.
+func (r *MetricsRecorder) Reset(run RunContext) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registry.mu.Lock()
+	defer r.registry.mu.Unlock()
+
+	r.registry.reset()
+	clear(r.admitted)
+	r.identity = identityFromRun(run)
+	r.registry.resources.identity = r.identity
+}
+
 // RecordSample validates the original request label, admits it once, and records
 // only the selected measurements. An invalid label changes neither admission nor
 // any measurements, including concurrency carried by this sample. Latency uses
@@ -61,7 +84,7 @@ func NewMetricsRecorder(registry *MetricsRegistry, labelLimit int) (*MetricsReco
 func (r *MetricsRecorder) RecordSample(sample RequestSample) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return recordRequestSample(r.registry, r.admitted, r.limit, sample, false)
+	return recordRequestSample(r.registry, r.admitted, r.limit, &r.identity, sample, false)
 }
 
 // ObserveLatency records only metric.Latency, in milliseconds, after request-name
@@ -95,7 +118,7 @@ func (r *MetricsRecorder) AddReceivedBytes(metric ShibuyaMetric) error {
 func (r *MetricsRecorder) RecordEvent(metric ShibuyaMetric) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return recordRequestSample(r.registry, r.admitted, r.limit, completeRequestSample(metric), true)
+	return recordRequestSample(r.registry, r.admitted, r.limit, &r.identity, completeRequestSample(metric), true)
 }
 
 // AddAggregateReceivedBytes records independently measured bytes under the source's
@@ -110,6 +133,7 @@ func (r *MetricsRecorder) AddAggregateReceivedBytes(metric ShibuyaMetric) error 
 	if _, err := metric.LabelIsValid(); err != nil {
 		return err
 	}
+	r.identity.bind(&metric)
 	r.registry.addReceivedBytes(metric)
 	return nil
 }
@@ -121,6 +145,7 @@ func (r *MetricsRecorder) SetConcurrency(metric ShibuyaMetric) {
 	defer r.mu.Unlock()
 	r.registry.mu.RLock()
 	defer r.registry.mu.RUnlock()
+	r.identity.bind(&metric)
 	r.registry.setConcurrency(metric)
 }
 
@@ -142,12 +167,14 @@ func recordRequestSample(
 	registry *MetricsRegistry,
 	admitted map[string]struct{},
 	limit int,
+	identity *metricIdentity,
 	sample RequestSample,
 	eventLatency bool,
 ) error {
 	registry.mu.RLock()
 	defer registry.mu.RUnlock()
 	metric := sample.Metric
+	identity.bind(&metric)
 	if _, err := metric.LabelIsValid(); err != nil {
 		return err
 	}

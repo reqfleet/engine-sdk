@@ -211,6 +211,7 @@ func TestResourceMetricsErrorsSkipUpdatesAndRecover(t *testing.T) {
 					sampler.results[0] = resourceSampleResult{err: resources.ErrSampleUnavailable}
 				}
 				registry.resources.sampler = sampler
+				recorder.Reset(RunContext{RunID: "run"})
 				server.startMetricsRun("run")
 				require.NoError(t, recorder.RecordEvent(ShibuyaMetric{RunID: "run", Label: "checkout", Status: "200", Latency: 1}))
 				ctx, cancel := context.WithCancel(context.Background())

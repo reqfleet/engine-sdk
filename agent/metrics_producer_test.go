@@ -4,6 +4,7 @@ package agent
 import (
 	"bytes"
 	"math"
+	"sync"
 	"testing"
 
 	dto "github.com/prometheus/client_model/go"
@@ -27,6 +28,9 @@ func TestMetricsRegistryUsesLabelSpecificLatencyHistogram(t *testing.T) {
 			registry := NewMetricsRegistry()
 			recorder, err := NewMetricsRecorder(registry, 1)
 			require.NoError(t, err)
+			recorder.Reset(RunContext{
+				CollectionID: "collection-1", PlanID: "plan-1", RunID: "run-1", AgentID: "engine-1", Zone: "zone-1",
+			})
 			require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
 				Label:        test.label,
 				CollectionID: "collection-1",
@@ -88,6 +92,9 @@ func TestLatencyHistogramWireContract(t *testing.T) {
 			registry := NewMetricsRegistry()
 			recorder, err := NewMetricsRecorder(registry, 1)
 			require.NoError(t, err)
+			recorder.Reset(RunContext{
+				CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
+			})
 			var sum float64
 			for _, observation := range test.observations {
 				require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
@@ -137,6 +144,9 @@ func TestMetricsRegistryIndependentUpdates(t *testing.T) {
 	registry := NewMetricsRegistry()
 	recorder, err := NewMetricsRecorder(registry, 1)
 	require.NoError(t, err)
+	recorder.Reset(RunContext{
+		CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
+	})
 	metric := ShibuyaMetric{
 		CollectionID: "collection",
 		PlanID:       "plan",
@@ -192,6 +202,9 @@ func TestMetricsRegistryIndependentUpdates(t *testing.T) {
 		registry := NewMetricsRegistry()
 		recorder, err := NewMetricsRecorder(registry, 1)
 		require.NoError(t, err)
+		recorder.Reset(RunContext{
+			CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
+		})
 		metric.Label = "llm_resp"
 		require.NoError(t, recorder.ObserveRequest(metric))
 		families := gatherCanonicalMetrics(t, registry)
@@ -219,6 +232,9 @@ func TestMetricsRegistryIndependentLatencyAndStatus(t *testing.T) {
 					registry := NewMetricsRegistry()
 					recorder, err := NewMetricsRecorder(registry, 1)
 					require.NoError(t, err)
+					recorder.Reset(RunContext{
+						CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
+					})
 					metric := ShibuyaMetric{
 						CollectionID: "collection",
 						PlanID:       "plan",
@@ -300,8 +316,17 @@ func TestMetricsRegistryInstancesAreIndependent(t *testing.T) {
 	second := NewMetricsRegistry()
 	firstRecorder, err := NewMetricsRecorder(first, 1)
 	require.NoError(t, err)
+	firstRun := RunContext{
+		CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
+	}
+	firstRecorder.Reset(firstRun)
 	secondRecorder, err := NewMetricsRecorder(second, 1)
 	require.NoError(t, err)
+	secondRun := RunContext{
+		CollectionID: "second-collection", PlanID: "second-plan", RunID: "second-run",
+		AgentID: "second-engine", Zone: "second-zone",
+	}
+	secondRecorder.Reset(secondRun)
 	metric := ShibuyaMetric{
 		CollectionID: "collection",
 		PlanID:       "plan",
@@ -317,14 +342,28 @@ func TestMetricsRegistryInstancesAreIndependent(t *testing.T) {
 
 	require.NoError(t, firstRecorder.RecordEvent(metric))
 	require.Empty(t, gatherCanonicalMetrics(t, second))
-	require.NoError(t, secondRecorder.RecordEvent(metric))
-	require.NoError(t, secondRecorder.RecordEvent(metric))
+	var workers sync.WaitGroup
+	for _, producer := range []struct {
+		recorder *MetricsRecorder
+		count    int
+	}{
+		{firstRecorder, 1},
+		{secondRecorder, 3},
+	} {
+		workers.Go(func() {
+			for range producer.count {
+				assert.NoError(t, producer.recorder.RecordEvent(metric))
+			}
+		})
+	}
+	workers.Wait()
 	for _, test := range []struct {
 		registry *MetricsRegistry
 		count    float64
+		run      RunContext
 	}{
-		{first, 1},
-		{second, 2},
+		{first, 2, firstRun},
+		{second, 3, secondRun},
 	} {
 		families := gatherCanonicalMetrics(t, test.registry)
 		require.Len(t, families, 4)
@@ -337,6 +376,17 @@ func TestMetricsRegistryInstancesAreIndependent(t *testing.T) {
 		assert.Equal(t, uint64(test.count), families["shibuya_latency_label_milliseconds"].Metric[0].GetHistogram().GetSampleCount())
 		assert.Equal(t, 100*test.count, families["shibuya_latency_label_milliseconds"].Metric[0].GetHistogram().GetSampleSum())
 		assert.Equal(t, float64(4), families["shibuya_threads_gauge"].Metric[0].GetGauge().GetValue())
+		for name, family := range families {
+			require.Len(t, family.Metric, 1)
+			extra := map[string]string{}
+			if name != "shibuya_threads_gauge" {
+				extra["label"] = "request"
+			}
+			if name == "shibuya_status_counter" {
+				extra["status"] = "200"
+			}
+			assertRecorderMetricLabels(t, family.Metric[0], test.run, extra)
+		}
 	}
 	secondBeforeReset := gatherCanonicalMetrics(t, second)
 	first.Reset()

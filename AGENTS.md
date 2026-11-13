@@ -163,9 +163,11 @@ For adapters that parse engine samples themselves, prefer SDK-owned collectors:
 create `agent.NewMetricsRegistry()` and pass it to `options.MetricsRegistry`.
 Create a `MetricsRecorder` with that registry and the resolved
 `options.LabelsUsageLimit`; pass the recorder to the adapter and set
-`options.CustomIngestMetrics` to its ingestion callback. Leave `MetricParser`,
-`MetricsHandler`, and native options unset. Use recorder methods rather than
-defining collectors or reporting CPU/memory. Collection runs independently of
+`options.CustomIngestMetrics` to its ingestion callback. In `BeforeStart`, call
+`recorder.Reset(run)` once with the supplied `RunContext` to bind identity and
+reset all reporting state; reuse the recorder on subsequent runs. Leave
+`MetricParser`, `MetricsHandler`, and native options unset. Use recorder methods
+rather than defining collectors or reporting CPU/memory. Collection runs independently of
 scrapes, with a final post-exit call before workspace reuse. The registry has no
 public recording methods, and its `Reset` is not a recorder run transition.
 See [the recording and lifecycle contract](agent/metrics.md#sdk-owned-registry).
@@ -307,8 +309,14 @@ one of these modes:
   feed cumulative snapshots into a per-request event parser.
 - **SDK recorder updates:** supply a `MetricsRegistry` and optionally
   `CustomIngestMetrics`; leave parser and native options unset. Normalize samples
-  and use a `MetricsRecorder` configured with the resolved budget. Its
-  `ObserveLatency`, `RecordStatus`, `ObserveRequest`, and `AddReceivedBytes`
+  and use a `MetricsRecorder` configured with the resolved budget.
+  Call `recorder.Reset(run)` with the callback's assigned `RunContext` before
+  first ingestion and each subsequent run, for example in `BeforeStart`.
+  This one operation binds request/resource identity and clears admission,
+  collectors, resource baseline, and collection errors. Quiesce prior-run
+  ingestion first and retain completed metrics for final scrapes until reset.
+  Sample identity is ignored; do not reset on every collection callback.
+  Its `ObserveLatency`, `RecordStatus`, `ObserveRequest`, and `AddReceivedBytes`
   methods validate/admit request names; `SetConcurrency` is independent.
   Use `AddAggregateReceivedBytes` for source-specific aggregate bytes, and
   `RecordSample` for other multi-measurement combinations. `RecordEvent` is only

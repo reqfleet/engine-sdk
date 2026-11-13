@@ -84,14 +84,18 @@
 // AddReceivedBytes, and SetConcurrency update independent measurements.
 // ObserveRequest records latency and status together; RecordEvent handles complete
 // events. Omit unavailable measurements rather than fabricating zero values.
-// MetricsRecorder owns synchronized request-name validation/admission for one run
+// MetricsRecorder owns synchronized assigned identity and request-name admission
 // using the same source-sample policy as result-file ingestion. RequestSample
 // presence flags prevent fabricated measurements; do not pre-admit request names.
 // Aggregate received bytes and independent concurrency bypass request admission.
-// Recorder callers still supply identity from RunContext; the recorder has no
-// run-reset operation. There are no global collectors. Registry Reset clears
-// collector/resource state, not recorder admission; it is not a recorder run
-// transition and must not be called during an active run.
+// Call recorder.Reset with the callback's RunContext before first ingestion and
+// each subsequent run; source identity is always ignored. This single transition
+// binds request/resource identity and resets admission, collectors, resource
+// baseline, and collection errors together. Quiesce prior-run callbacks and
+// ingestion first: reset is not cancellation. Completion retains final metrics
+// until the caller explicitly resets, for example in the next BeforeStart.
+// There are no global collectors. Registry Reset remains a low-level
+// collector/resource reset, not a recorder transition. Never reset an active run.
 // CustomIngestMetrics lets adapters normalize independent engine samples that
 // do not fit MetricParser's complete-request event model. The SDK runs it after
 // launch and every 250ms, separately from Observe and Progress.

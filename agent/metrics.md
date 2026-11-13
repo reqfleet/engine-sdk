@@ -78,10 +78,10 @@ in native handler/URL modes. No collectors use process-global state. Do not shar
 a registry between servers or register duplicate families.
 
 `MetricsRegistry` exposes `Gather` and `Reset`, not public recording methods.
-Use `MetricsRecorder` for adapter-produced samples, with identity from
-`RunContext`. The former registry recording methods are removed: move calls to
-the recorder, handle its validation errors, and remove adapter-owned request
-admission. Result-file parsers continue to use `MetricParser` unchanged.
+Use `MetricsRecorder` for adapter-produced samples, binding identity once from
+`RunContext` with `recorder.Reset(run)`. The former registry recording methods
+are removed: move calls to the recorder, handle its validation errors, and remove
+adapter-owned request admission. Result-file parsers use `MetricParser` unchanged.
 
 #### Run-scoped recorder
 
@@ -89,8 +89,12 @@ admission. Result-file parsers continue to use `MetricParser` unchanged.
 and an error. Supply a non-nil registry and the already-resolved nonnegative
 budget; the constructor does not read the environment, reset collectors, or
 start workers. Pass that same registry to `AgentServerOptions.MetricsRegistry`.
-Use one recorder for all request-labelled samples in one agent/run, without
-pre-admitting names. Separate recorders have independent admission state.
+Use one recorder per registry for all request-labelled samples, without
+pre-admitting names. Separate recorder/registry pairs have independent state.
+Call `recorder.Reset(run)` with the callback's assigned `RunContext` before first
+ingestion and each subsequent run, for example in `BeforeStart`. Reuse that
+recorder rather than creating a new one on every run. Construction alone leaves
+identity empty; source identity is never a fallback.
 
 Use the named recorder methods for independently available measurements:
 
@@ -114,7 +118,7 @@ including for `llm_resp`. Use it for other multi-measurement combinations rather
 than splitting one source sample across independent calls. For latency alone:
 
 ```go
-err := recorder.ObserveLatency(metric) // milliseconds and caller-supplied run identity
+err := recorder.ObserveLatency(metric) // milliseconds; identity comes from Reset(run)
 ```
 
 `recorder.RecordEvent(metric)` selects all four measurements and preserves
@@ -139,16 +143,31 @@ label is still validated. Independent measurements remain recordable after a
 different request sample is rejected. CPU/memory collection stays SDK-owned and
 does not use request-name admission.
 
-The recorder serializes admission with recording. The shared sample path holds
-the registry lock across validation, admission, and all selected updates, so a
-registry reset cannot split a sample. This does not promise transactional
-multi-family scrapes. Completed-run metrics and admission remain retained.
-This API owns admission only: callers still supply assigned identity in each
-metric, and it has no reset/new-run operation. Do not reuse a recorder across
-runs or use `registry.Reset()` as a recorder transition: that low-level operation
-clears collectors, not recorder admission. Assigned-identity binding and a single
-coordinated recorder transition are separately scoped in #34 and #35; there is
-no separate admission-reset API for adapters to orchestrate.
+The recorder serializes identity binding and admission with recording. The shared
+result-file/recorder sample path holds the registry lock across binding,
+validation, admission, and all selected updates, so a reset cannot split a sample.
+This does not promise transactional multi-family scrapes during ordinary recording.
+
+`recorder.Reset(run)` is the single explicit next-run transition. Under the same
+synchronization as recording and gathering, it retires the previous identity,
+clears request-name admission, resets ordinary and LLM histograms, status and
+received-byte counters, concurrency and resource gauges, collection errors, and
+the resource sampling baseline, then binds the next assigned identity for request
+and resource metrics. The configured label budget is unchanged. It copies only
+the five identity strings, not settings, artifacts, or workspace data. Assignment
+fields are not validated; empty assigned fields remain empty.
+
+The caller chooses when this transition happens. Quiesce prior-run ingestion,
+callbacks, and resource sampling first; the SDK joins its workers before releasing
+the workspace. Reset does not cancel work or reject late samples: a subsequent
+sample belongs to the newly bound run. Reset takes effect immediately, not on
+successful process launch. Keep completed-run values for required final scrapes
+before invoking it. Process exit, completion, and scrapes never reset the recorder.
+Do not call it on every collection callback or during an active workload.
+
+Do not use `registry.Reset()` as a recorder transition: that low-level operation
+clears collectors and resource state, but not recorder identity or admission.
+There are no separate recorder identity/admission clears for adapters to coordinate.
 
 #### Collection callback and registry lifecycle
 
@@ -175,13 +194,14 @@ coordinator-requested stop, including scheduled completion. Live and final
 collection calls never overlap, and the workspace is not released until final
 collection completes.
 
-Retain completed-run values for final scrapes. `registry.Reset()` clears all
-series, collection errors, and resource identity/baseline, but does not clear
-recorder admission or establish a new recorder run. The SDK assigns resource
-identity and clears collection errors on successful launch. Without explicit
-registry reset, prior-run series remain separately labelled. Never reset during
-an active run. Recording and gathering are concurrency-safe, but a scrape is not
-a transaction across independent metric updates.
+Retain completed-run values for final scrapes until the caller invokes
+`recorder.Reset(run)` for the next run. For registry-only/result-file integrations,
+`registry.Reset()` retains its low-level behavior: it clears all series,
+collection errors, and resource identity/baseline. The SDK assigns resource
+identity and clears collection errors on successful launch, without clearing
+collected values. Without an explicit reset, prior-run series remain separately
+labelled. Never reset during an active run. Recording and gathering are
+concurrency-safe, but a scrape is not a transaction across independent updates.
 
 HTTP only gathers the current registry: it does not read files, sample resources,
 or invoke callbacks. Before any samples, it may return an empty exposition;
@@ -251,12 +271,18 @@ Unlabelled resource families are not folded.
 Every series carries identity labels
 `I = {collection_id, plan_id, run_id, engine_no, zone}`.
 
-Result parsers supply request values. The runtime overwrites `ShibuyaMetric`'s
-collection, plan, run, engine, and zone with the assigned run's identity before
-recording the event. Recorder callers populate these fields from their
-callback `RunContext`; they do not infer assignments. Native adapters supply the
-same identity labels using resolved `EngineMeta` and `RunContext.RunID`, or the
-runtime's same-named workload environment variables for an external producer.
+Result parsers supply request values. Result-file ingestion and the recorder use
+the same identity-binding implementation: the assigned collection, plan, run,
+agent (`engine_no`), and zone overwrite all source identity fields before
+recording. Recorder callers bind the callback's `RunContext` once with `Reset(run)`;
+they need not populate identity in each `ShibuyaMetric`. Missing or conflicting
+sample identity cannot override that assignment, including empty assigned fields.
+The same bound identity applies to ordinary/LLM timing, status, request and
+aggregate received bytes, concurrency, and composed CPU/memory metrics.
+Native adapters remain responsible for their own identity labels using resolved
+`EngineMeta` and `RunContext.RunID`, or the runtime's same-named workload
+environment variables for an external producer. Recorder reset does not affect
+native handlers or URL-backed producers.
 
 | Historical family name | Type | Unit and meaning | Labels |
 | --- | --- | --- | --- |
@@ -534,8 +560,8 @@ these rules:
 - A nil error means both `CPUCores` and `MemoryBytes` are reportable, including
   genuine zero usage.
 - Call `Reset()` at each run boundary; it discards the CPU baseline. The SDK
-  resets automatically on successful launch; adapters using its registry do not
-  manage the sampler.
+  composes this reset into `MetricsRecorder.Reset(run)` and also resets the
+  baseline on successful launch. Registry adapters do not manage the sampler.
 
 `errors.Is(err, resources.ErrSampleUnavailable)` identifies an expected baseline
 attempt, not a zero-usage measurement. Omit both resource series, including

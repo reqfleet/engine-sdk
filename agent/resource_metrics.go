@@ -14,9 +14,8 @@ type resourceSampler interface {
 }
 
 type resourceMetrics struct {
-	sampler resourceSampler
-	runID   string
-	meta    EngineMeta
+	sampler  resourceSampler
+	identity metricIdentity
 }
 
 func newResourceMetrics() resourceMetrics {
@@ -25,8 +24,7 @@ func newResourceMetrics() resourceMetrics {
 
 // reset runs under the registry's exclusive lock, after in-flight sampling finishes.
 func (r *resourceMetrics) reset() {
-	r.runID = ""
-	r.meta = EngineMeta{}
+	r.identity = metricIdentity{}
 	r.sampler.Reset()
 }
 
@@ -34,7 +32,7 @@ func (m *MetricsRegistry) startResourceRun(meta EngineMeta, runID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resources.reset()
-	m.resources.meta, m.resources.runID = meta, runID
+	m.resources.identity = identityFromMeta(meta, runID)
 	m.collectionErr = nil
 }
 
@@ -43,20 +41,21 @@ func (m *MetricsRegistry) sampleResources() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	r := &m.resources
-	if r.runID == "" {
+	identity := &r.identity
+	if identity.runID == "" {
 		return nil
 	}
 	sample, err := r.sampler.Sample()
 	if errors.Is(err, resources.ErrSampleUnavailable) {
-		m.cpuGauge.DeleteLabelValues(r.meta.CollectionID, r.meta.PlanID, r.runID, r.meta.Zone, r.meta.EngineID)
-		m.memGauge.DeleteLabelValues(r.meta.CollectionID, r.meta.PlanID, r.runID, r.meta.Zone, r.meta.EngineID)
+		m.cpuGauge.DeleteLabelValues(identity.collectionID, identity.planID, identity.runID, identity.zone, identity.agentID)
+		m.memGauge.DeleteLabelValues(identity.collectionID, identity.planID, identity.runID, identity.zone, identity.agentID)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	m.cpuGauge.WithLabelValues(r.meta.CollectionID, r.meta.PlanID, r.runID, r.meta.Zone, r.meta.EngineID).Set(sample.CPUCores)
-	m.memGauge.WithLabelValues(r.meta.CollectionID, r.meta.PlanID, r.runID, r.meta.Zone, r.meta.EngineID).Set(float64(sample.MemoryBytes))
+	m.cpuGauge.WithLabelValues(identity.collectionID, identity.planID, identity.runID, identity.zone, identity.agentID).Set(sample.CPUCores)
+	m.memGauge.WithLabelValues(identity.collectionID, identity.planID, identity.runID, identity.zone, identity.agentID).Set(float64(sample.MemoryBytes))
 	return nil
 }
 
