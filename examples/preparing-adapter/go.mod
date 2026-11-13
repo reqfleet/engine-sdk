@@ -1,6 +1,6 @@
 module example.com/reqfleet/preparing-adapter
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/reqfleet/engine-sdk v0.1.1
