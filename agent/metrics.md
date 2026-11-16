@@ -101,7 +101,7 @@ Use the named recorder methods for independently available measurements:
 | Method | Measurements recorded |
 | --- | --- |
 | `ObserveLatency(metric)` | Only ordinary request latency, including a measured zero |
-| `RecordStatus(metric)` | Only one supplied status outcome |
+| `RecordStatus(metric)` | Only one supplied status event, including a received token under `tps` |
 | `ObserveRequest(metric)` | Ordinary request latency and one status outcome together |
 | `AddReceivedBytes(metric)` | Only bytes attributed to the named request |
 
@@ -128,11 +128,11 @@ measurements from HTTP metadata; omit unavailable timings rather than supplying
 zero. An ordinary HTTP request named `llm_resp` still uses the ordinary histogram
 through `ObserveRequest`, `ObserveLatency`, or `RecordSample`.
 
-For independent TPS payload bytes and optional inter-chunk timing, use
-`AddReceivedBytes` and `ObserveLatency` respectively with `Label: "tps"`.
-The [engine-neutral LLM contract](#llm-streaming-metrics) defines their measurement
-boundaries and byte-source exclusivity. These are independent samples, not
-complete request events.
+For independent TPS, call `RecordStatus` once per genuinely received generated
+token with `Label: "tps"` and `Status: "200"`, including the first token.
+This records a successful token-receipt event, not an HTTP response, timing or byte sample.
+The [engine-neutral LLM contract](#llm-streaming-metrics) defines token cardinality,
+optional inter-token timing and independent bandwidth reporting.
 
 `recorder.RecordSample(agent.RequestSample{...})` accepts a `Metric` and explicit
 `HasLatency`, `HasStatus`, `HasReceivedBytes`, and `HasConcurrency` flags. Set only
@@ -312,7 +312,7 @@ native handlers or URL-backed producers.
 | --- | --- | --- | --- |
 | `shibuya_latency_label_milliseconds` | Classic histogram | Ordinary request latency in milliseconds, with adapter-specific timing semantics below | I + `label`; buckets also have `le` |
 | `shibuya_latency_llm_resp_milliseconds` | Optional classic histogram | LLM response duration in milliseconds | I + `label`; buckets also have `le` |
-| `shibuya_status_counter` | Counter | Recorded outcomes, grouped by source status | I + `label` + `status` |
+| `shibuya_status_counter` | Counter | Recorded outcomes or token-receipt events under `tps`, grouped by source status | I + `label` + `status` |
 | `shibuya_egress_bytes_counter` | Counter | Recorded response/received bytes, despite the historical “egress” name | I + `label` |
 | `shibuya_threads_gauge` | Gauge | Current per-engine concurrency | I |
 | `shibuya_cpu_gauge` | Gauge | CPU cores consumed | I |
@@ -355,43 +355,54 @@ and bounds follow [histogram compatibility](#histogram-compatibility).
 | --- | --- | --- |
 | Time to first token (TTFT) | `shibuya_latency_label_milliseconds`, `label="ttft"` | Milliseconds from sending the generation request until the first nonempty generated-token payload reaches the client; at most one observation per generation |
 | Full response latency | `shibuya_latency_llm_resp_milliseconds`, `label="llm_resp"` | Milliseconds from the same request start until the protocol signals a complete answer; one observation per completed generation |
-| Streamed payload bandwidth (historical TPS chart) | `shibuya_egress_bytes_counter`, `label="tps"` | Measured generated-payload byte deltas, including the first chunk; accumulate bytes, not rates |
-| Optional inter-chunk cadence | `shibuya_latency_label_milliseconds`, `label="tps"` | Milliseconds between successive generated-payload chunks within the same generation, beginning with the second chunk |
+| Received-token throughput (TPS) | `shibuya_status_counter`, `label="tps"` | One increment per received generated token, including the first; accumulate token counts, not rates or bytes |
+| Optional inter-token gap | `shibuya_latency_label_milliseconds`, `label="tps"` | Measured milliseconds between successive received tokens within the same generation, beginning with the second token |
 
 TTFT and response latency use the client-observed generation interval, not just
 model execution time. Instrument a monotonic elapsed-time clock where the client
 provides one, and document any clock-resolution limitations. Stream-open events,
 HTTP first bytes, heartbeats, role-only deltas and completion markers are not
-generated tokens. A buffered response cannot recover token/chunk arrival times.
+generated tokens. A buffered response cannot recover individual token arrival times.
 Do not substitute HTTP waiting time for TTFT or HTTP duration for an unmeasured
 LLM completion. Non-streaming clients may report measured full response latency
-without reporting TTFT or cadence.
+without reporting TTFT or inter-token gaps.
 
-Each stream has its own previous-chunk timestamp. The first chunk contributes
-bytes but no inter-chunk observation; never span separate generations or treat a
-completion marker as another generated chunk. Convert source durations to
-milliseconds before recording. Timings are individual observations, not running
-totals, precomputed percentiles or average durations.
+Each stream has its own previous-token timestamp. The first token contributes
+one TPS increment independently of whether TTFT is recorded, but no inter-token
+gap. Never span separate generations or treat a completion marker as another
+token. Convert measured durations to milliseconds before recording. Timings are
+individual observations, not running totals, precomputed percentiles or average
+durations. Inter-token gaps are optional: they are neither required for TPS nor
+the denominator of the current chart.
 
-The historical `tps` label means **payload bytes per second**, not model tokens
-per second. For the selected identity filters, derive bandwidth with
-`sum(rate(shibuya_egress_bytes_counter{label="tps",...}[5s]))`. A chunk may contain
-multiple model tokens; message counts, inverse inter-chunk latency and byte counts
-are not token counts. True model-token throughput requires explicit output-token
-counts from the model or its matching tokenizer and a defined timing interval.
-This profile defines no normalized token-count family; never store token counts
-in the byte counter or silently reinterpret the TPS chart's unit.
+For the selected identity filters, the existing TPS chart uses
+`sum(rate(shibuya_status_counter{label="tps",...}[5s]))`: received tokens per
+second. It sums all statuses, so failure markers MUST NOT be recorded under
+`tps`. The chart does not use byte counters or divide token counts by recorded
+latency. A token contributes one increment regardless of its payload length,
+including multibyte text.
 
-Measure actual generated-payload bytes after protocol parsing and decompression,
-not character counts, protocol envelopes, transfer framing or full wire traffic.
-For text, use the payload encoding's byte length and document that encoding.
-Exclude control-only messages and count each payload byte once. Do not add a full
-response summary after already recording its chunks, or publish overlapping
-totals under `llm_resp`, request URLs or an engine aggregate in the same normalized
-byte family. Adapters MUST select a nonoverlapping byte source/attribution before
-ingestion and retain that choice for the run. Missing selected measurements do
-not permit a switch to aggregate traffic, estimated subtraction or fabricated
-zeroes. Independent, demonstrably disjoint traffic can retain its own attribution.
+SSE framing, a WebSocket message, or a nonempty content chunk does not establish
+model-token cardinality. An endpoint that guarantees one generated token per
+event permits one increment per content event. A batched event requires a known
+token count or individual token observations; expand a known count into one
+recorder call per token. Without that evidence, do not claim model-token TPS.
+Do not estimate token counts from characters or bytes, assume every chunk is one
+token, or invent arrival times for tokens within a batch. Empty content,
+heartbeats, role-only deltas, `[DONE]` and other completion/control messages do
+not count. Completion usage totals are not receipt events: do not replay them as
+tokens at completion or add them after already counting the received tokens.
+
+Bandwidth remains independent in `shibuya_egress_bytes_counter`, in bytes.
+Enabling TPS MUST NOT disable or replace an engine's selected native aggregate
+or request-attributed byte source. Keep the byte source's documented measurement
+boundary and encoding; count each received byte only once. If optional payload
+bytes are measured separately, do not add them on top of overlapping native
+traffic or a full-response summary in the same normalized family. Select a
+nonoverlapping byte source/attribution for the run independently of TPS; do not
+invent subtraction, distribute aggregate traffic across tokens, or substitute
+token counts for bytes. Missing byte measurements remain unavailable without
+preventing genuine token events from being counted.
 
 ### Recording, failures and admission
 
@@ -399,30 +410,55 @@ For independent observations, use the run-bound recorder:
 
 - TTFT: `ObserveLatency` with `Label: metricschema.TTFTLabel`.
 - Response latency: `ObserveLLMResponse(latencyMS)`, which selects the wide family.
-- Payload bytes: `AddReceivedBytes` with `Label: "tps"` and the measured byte delta.
-- Inter-chunk cadence: `ObserveLatency` with `Label: "tps"`.
+- Received token: `RecordStatus` with `Label: "tps"` and `Status: "200"`,
+  exactly once per token, including the first.
+- Optional inter-token gap: `ObserveLatency` with `Label: "tps"`.
+- Received bytes: `AddReceivedBytes` for request-attributed bytes or
+  `AddAggregateReceivedBytes` for a bounded source-specific aggregate label,
+  independently of token recording.
 
-Use `RecordSample` with only `HasLatency` and `HasReceivedBytes` if one source
-sample genuinely contains both cadence and a byte delta. Independent LLM timings
-and bytes MUST NOT create status outcomes or update concurrency. Record genuine
-request/generation outcomes separately, once per reported attempt, preserving
-the actual failure classification. Never manufacture a complete `ShibuyaMetric`
-event merely to transport a timing or byte-only observation. Native producers
-emit the equivalent cumulative families directly; a native snapshot is not a
-delta to add again on every scrape.
+For example, each genuine token observation records only:
 
-Validate finite, nonnegative observations at ingestion; measured zero is valid.
+```go
+err := recorder.RecordStatus(agent.ShibuyaMetric{Label: "tps", Status: "200"})
+```
+
+`200` is the normalized successful token-event outcome, not a fabricated
+per-token HTTP response. Existing error reporting classifies non-2xx/non-3xx
+statuses as errors, so a textual receipt status such as `received` would
+incorrectly classify tokens as failures. The recorder supplies run identity and
+shared admission. Legacy adapters may use their own success status; the TPS
+chart does not require exact status-key uniformity.
+For a source sample that genuinely contains both a token receipt and a measured
+gap, `RecordSample` may select only `HasStatus` and `HasLatency`. Neither a token
+count nor an independent timing creates received bytes or updates concurrency.
+Never manufacture a complete `ShibuyaMetric` event merely to transport an
+independent measurement. Record request/generation success or failure separately,
+once per reported attempt under its request/generation label, preserving the
+actual classification. An error marker is not a token, even after some tokens
+have been received.
+
+Native producers emit equivalent cumulative token counts directly, not current
+rates, batch sizes or a count of scrapes. Preserve a genuine cumulative
+received-token source as a cumulative counter; never add its whole value again
+on each scrape or pass it through `RecordStatus` as though it were one token.
+Receipt samples instead contribute exactly one increment each. A completion-only
+total cannot establish live received-token throughput.
+
+Validate finite, nonnegative timing and byte observations at ingestion; measured
+zero is valid for those measurements. A token-receipt sample represents exactly
+one token, not a zero, byte value, cumulative total or precomputed rate.
 If a generation fails before its first token, omit TTFT. If it fails or is
 interrupted before completion, omit the unavailable full response duration.
-Retain already measured TTFT, payload bytes and cadence; do not retract them or
-pretend an incomplete stream completed. A failure outcome remains reportable even
-when none of these optional measurements is available.
+Retain already measured TTFT, token counts, bytes and inter-token gaps; do not
+retract them or pretend an incomplete stream completed. A failure outcome remains
+reportable separately even when none of these optional measurements is available.
 
 The labels share the ordinary [request-name budget](#request-name-budget), byte
 limit and assigned identity. They are not exempt slots. Preserve admission across
 families: excess names fold into the producer's declared `others`/`_other_` label.
-TTFT and cadence keep ordinary histogram bounds; independent response observations
-keep the wide LLM family under overflow. Folded ordinary series may mix several
+TTFT and inter-token gaps keep ordinary histogram bounds; independent response
+observations keep the wide LLM family under overflow. Folded ordinary series may mix several
 measurements, so do not present `others` as if it were an identifiable TTFT or TPS
 series. Avoid ordinary request grouping names that collide with these labels.
 Apply the existing cumulative retention, final-drain and reset contracts.
@@ -430,12 +466,17 @@ Apply the existing cumulative retention, final-drain and reset contracts.
 ### Engine mappings and compatibility
 
 Each adapter MUST document its native source fields, units/conversions, selectors,
-protocol completion and generated-content detection, payload encoding, byte-source
-exclusions and unsupported measurements. These choices may differ across k6,
-Locust, JMeter, Replay and other engines; the normalized meanings above do not.
+protocol completion, generated-token detection and cardinality evidence,
+independent byte-source boundaries/exclusions and unsupported measurements.
+These choices may differ across k6, Locust, JMeter, Replay and other engines;
+the normalized meanings above do not. Custom counters require genuine client
+instrumentation; selecting a metric does not add streaming support to stock k6
+or any other engine. No streaming extension or new recorder API is required by
+this contract.
 Verify representative successful and failed/interrupted streams, multibyte payloads,
-first-chunk accounting, missing observations, source exclusivity, no synthetic
-outcomes, label overflow, retained final values and reset against native output.
+first-token accounting, batched events, excluded controls/failure markers, missing
+observations, independent nonoverlapping bytes, no synthetic request outcomes,
+label overflow, retained final values and reset against native output.
 
 This specification does not assert that every existing engine image implements
 these measurements. Existing complete-event integrations retain their documented
@@ -445,8 +486,9 @@ not migrate those integrations or reinterpret historical data. To report
 independent LLM measurements with the semantics above, adapt the source mapping
 and use the recorder or a conforming normalized producer; verify each engine
 before claiming support. Do not require older images to change merely because a
-coordinator is upgraded. No new family, unit change, protocol negotiation or
-automatic conformance enforcement is introduced here.
+coordinator is upgraded. This correction describes the existing token-count
+chart; it introduces no new family, required timing metric, recorder API, protocol
+negotiation or automatic conformance enforcement.
 
 ## Request-label validation
 
@@ -638,6 +680,7 @@ Apply the selected collection/run/plan/label/zone filters to these formulas:
 | --- | --- |
 | Status totals | `sum by (status) (shibuya_status_counter{...})` |
 | Request rate | `sum(rate(shibuya_status_counter{...}[5s]))` |
+| Received-token rate (TPS) | `sum(rate(shibuya_status_counter{label="tps",...}[5s]))` |
 | Recorded bytes | `sum(shibuya_egress_bytes_counter{...})` |
 | Bytes per second | `sum(rate(shibuya_egress_bytes_counter{...}[5s]))` |
 | Mean latency | `sum(H_sum{...}) / sum(H_count{...})`; for live windows, divide summed rates of the same components |
