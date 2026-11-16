@@ -82,6 +82,9 @@
 // MetricsRegistry owns per-agent collectors and exposes gathering and collector
 // reset, not public recording methods. MetricsRecorder.ObserveLatency, RecordStatus,
 // AddReceivedBytes, and SetConcurrency update independent measurements.
+// ObserveLLMResponse records an independent, finite nonnegative millisecond timing
+// in the wide LLM response histogram, even when shared admission folds llm_resp
+// into others; it creates no ordinary latency, status, bytes, or concurrency.
 // ObserveRequest records latency and status together; RecordEvent handles complete
 // events. Omit unavailable measurements rather than fabricating zero values.
 // MetricsRecorder owns synchronized assigned identity and request-name admission
