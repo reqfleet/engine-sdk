@@ -128,6 +128,12 @@ measurements from HTTP metadata; omit unavailable timings rather than supplying
 zero. An ordinary HTTP request named `llm_resp` still uses the ordinary histogram
 through `ObserveRequest`, `ObserveLatency`, or `RecordSample`.
 
+For independent TPS payload bytes and optional inter-chunk timing, use
+`AddReceivedBytes` and `ObserveLatency` respectively with `Label: "tps"`.
+The [engine-neutral LLM contract](#llm-streaming-metrics) defines their measurement
+boundaries and byte-source exclusivity. These are independent samples, not
+complete request events.
+
 `recorder.RecordSample(agent.RequestSample{...})` accepts a `Metric` and explicit
 `HasLatency`, `HasStatus`, `HasReceivedBytes`, and `HasConcurrency` flags. Set only
 the flags for measurements present in that source sample. Zero is a real
@@ -316,7 +322,8 @@ A classic histogram's sample series are its `_bucket`, `_sum`, and `_count`
 components. The base family name is not itself a sample series. Preserve these
 historical names rather than adding `_total` or changing the byte-counter name.
 
-Use lowercase reserved labels `ttft` and `llm_resp` for optional LLM timing.
+Use lowercase reserved labels `ttft`, `llm_resp`, and `tps` for the optional
+measurements defined in [LLM streaming metrics](#llm-streaming-metrics).
 The runtime routes `llm_resp` complete events into the separate wide histogram
 after admission (its routing comparison is case-insensitive, but reporting
 selectors use the lowercase label). This legacy event routing is unchanged:
@@ -326,6 +333,120 @@ an event folded into `others` uses the ordinary histogram. In contrast,
 do not emit a fabricated zero timing. Independent timing methods record only
 their histograms. Complete events also record status, bytes, and concurrency;
 do not manufacture complete events for independently measured timings.
+
+## LLM streaming metrics
+
+This is the common reporting contract for **every engine adapter** that supplies
+optional LLM measurements, including SDK recorder users, result-file integrations,
+in-process exporters and native endpoints. Engine-specific documentation defines
+how to obtain and select the measurements, not a different meaning for the same
+normalized series. The SDK does not provide a streaming client, tokenizer or
+automatic engine instrumentation. An engine may support only a subset; absent
+measurements MUST remain absent rather than become zero or HTTP-derived estimates.
+
+### Measurements and units
+
+Use the exact lowercase reporting labels below. A case-insensitive comparison in
+a legacy ingestion path or UI does not make uppercase Prometheus label values
+equivalent. Every series carries the assigned identity `I`; histogram components
+and bounds follow [histogram compatibility](#histogram-compatibility).
+
+| Measurement | Normalized family and label | Source observation |
+| --- | --- | --- |
+| Time to first token (TTFT) | `shibuya_latency_label_milliseconds`, `label="ttft"` | Milliseconds from sending the generation request until the first nonempty generated-token payload reaches the client; at most one observation per generation |
+| Full response latency | `shibuya_latency_llm_resp_milliseconds`, `label="llm_resp"` | Milliseconds from the same request start until the protocol signals a complete answer; one observation per completed generation |
+| Streamed payload bandwidth (historical TPS chart) | `shibuya_egress_bytes_counter`, `label="tps"` | Measured generated-payload byte deltas, including the first chunk; accumulate bytes, not rates |
+| Optional inter-chunk cadence | `shibuya_latency_label_milliseconds`, `label="tps"` | Milliseconds between successive generated-payload chunks within the same generation, beginning with the second chunk |
+
+TTFT and response latency use the client-observed generation interval, not just
+model execution time. Instrument a monotonic elapsed-time clock where the client
+provides one, and document any clock-resolution limitations. Stream-open events,
+HTTP first bytes, heartbeats, role-only deltas and completion markers are not
+generated tokens. A buffered response cannot recover token/chunk arrival times.
+Do not substitute HTTP waiting time for TTFT or HTTP duration for an unmeasured
+LLM completion. Non-streaming clients may report measured full response latency
+without reporting TTFT or cadence.
+
+Each stream has its own previous-chunk timestamp. The first chunk contributes
+bytes but no inter-chunk observation; never span separate generations or treat a
+completion marker as another generated chunk. Convert source durations to
+milliseconds before recording. Timings are individual observations, not running
+totals, precomputed percentiles or average durations.
+
+The historical `tps` label means **payload bytes per second**, not model tokens
+per second. For the selected identity filters, derive bandwidth with
+`sum(rate(shibuya_egress_bytes_counter{label="tps",...}[5s]))`. A chunk may contain
+multiple model tokens; message counts, inverse inter-chunk latency and byte counts
+are not token counts. True model-token throughput requires explicit output-token
+counts from the model or its matching tokenizer and a defined timing interval.
+This profile defines no normalized token-count family; never store token counts
+in the byte counter or silently reinterpret the TPS chart's unit.
+
+Measure actual generated-payload bytes after protocol parsing and decompression,
+not character counts, protocol envelopes, transfer framing or full wire traffic.
+For text, use the payload encoding's byte length and document that encoding.
+Exclude control-only messages and count each payload byte once. Do not add a full
+response summary after already recording its chunks, or publish overlapping
+totals under `llm_resp`, request URLs or an engine aggregate in the same normalized
+byte family. Adapters MUST select a nonoverlapping byte source/attribution before
+ingestion and retain that choice for the run. Missing selected measurements do
+not permit a switch to aggregate traffic, estimated subtraction or fabricated
+zeroes. Independent, demonstrably disjoint traffic can retain its own attribution.
+
+### Recording, failures and admission
+
+For independent observations, use the run-bound recorder:
+
+- TTFT: `ObserveLatency` with `Label: metricschema.TTFTLabel`.
+- Response latency: `ObserveLLMResponse(latencyMS)`, which selects the wide family.
+- Payload bytes: `AddReceivedBytes` with `Label: "tps"` and the measured byte delta.
+- Inter-chunk cadence: `ObserveLatency` with `Label: "tps"`.
+
+Use `RecordSample` with only `HasLatency` and `HasReceivedBytes` if one source
+sample genuinely contains both cadence and a byte delta. Independent LLM timings
+and bytes MUST NOT create status outcomes or update concurrency. Record genuine
+request/generation outcomes separately, once per reported attempt, preserving
+the actual failure classification. Never manufacture a complete `ShibuyaMetric`
+event merely to transport a timing or byte-only observation. Native producers
+emit the equivalent cumulative families directly; a native snapshot is not a
+delta to add again on every scrape.
+
+Validate finite, nonnegative observations at ingestion; measured zero is valid.
+If a generation fails before its first token, omit TTFT. If it fails or is
+interrupted before completion, omit the unavailable full response duration.
+Retain already measured TTFT, payload bytes and cadence; do not retract them or
+pretend an incomplete stream completed. A failure outcome remains reportable even
+when none of these optional measurements is available.
+
+The labels share the ordinary [request-name budget](#request-name-budget), byte
+limit and assigned identity. They are not exempt slots. Preserve admission across
+families: excess names fold into the producer's declared `others`/`_other_` label.
+TTFT and cadence keep ordinary histogram bounds; independent response observations
+keep the wide LLM family under overflow. Folded ordinary series may mix several
+measurements, so do not present `others` as if it were an identifiable TTFT or TPS
+series. Avoid ordinary request grouping names that collide with these labels.
+Apply the existing cumulative retention, final-drain and reset contracts.
+
+### Engine mappings and compatibility
+
+Each adapter MUST document its native source fields, units/conversions, selectors,
+protocol completion and generated-content detection, payload encoding, byte-source
+exclusions and unsupported measurements. These choices may differ across k6,
+Locust, JMeter, Replay and other engines; the normalized meanings above do not.
+Verify representative successful and failed/interrupted streams, multibyte payloads,
+first-chunk accounting, missing observations, source exclusivity, no synthetic
+outcomes, label overflow, retained final values and reset against native output.
+
+This specification does not assert that every existing engine image implements
+these measurements. Existing complete-event integrations retain their documented
+status/byte/concurrency side effects and legacy `llm_resp` routing, including
+ordinary-family routing after event-label overflow. Updating this document does
+not migrate those integrations or reinterpret historical data. To report
+independent LLM measurements with the semantics above, adapt the source mapping
+and use the recorder or a conforming normalized producer; verify each engine
+before claiming support. Do not require older images to change merely because a
+coordinator is upgraded. No new family, unit change, protocol negotiation or
+automatic conformance enforcement is introduced here.
 
 ## Request-label validation
 
