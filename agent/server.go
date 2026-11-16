@@ -84,13 +84,15 @@ type AgentServer struct {
 	stateLock sync.RWMutex
 
 	// Concurrent access fields
-	bus      chan metricEvent
-	requests chan agentRequest
-	metrics  *MetricsRegistry
-	// Label tracking
-	labelsLock       sync.RWMutex
-	labelsByRun      map[string]map[string]struct{}
+	requests         chan agentRequest
+	metrics          *MetricsRegistry
 	labelsUsageLimit int
+
+	// Result-file ingestion is serialized with run transitions.
+	resultMetricsLock sync.Mutex
+	resultMetricsRun  string
+	resultRecorder    *MetricsRecorder
+	resultRecorderErr error
 
 	// Native admission survives run completion for the final upstream scrape.
 	nativeMetricsLock sync.Mutex
@@ -130,7 +132,6 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 	}
 	as := &AgentServer{
 		runtime:          agentRuntimeProgress{retired: make(map[string]protocol.RunState)},
-		bus:              make(chan metricEvent),
 		requests:         make(chan agentRequest, 1),
 		options:          opts,
 		cdrclient:        coordinator.NewClient(httpClient),
@@ -148,29 +149,32 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 		},
 	}
 	if opts.MetricsURL == "" && opts.MetricsHandler == nil {
-		as.labelsByRun = make(map[string]map[string]struct{})
 		as.metrics = opts.MetricsRegistry
 		if as.metrics == nil {
 			as.metrics = NewMetricsRegistry()
+		}
+		if as.usesResultFileMetrics() {
+			as.resultRecorder, as.resultRecorderErr = NewMetricsRecorder(as.metrics, opts.LabelsUsageLimit)
 		}
 	}
 	return as
 }
 
-func (as *AgentServer) handleMetricStream() {
-	for event := range as.bus {
-		as.makePromMetrics(event)
+// finishResultMetricsRun waits for in-flight recording without clearing final metrics.
+func (as *AgentServer) finishResultMetricsRun(runID string) {
+	as.resultMetricsLock.Lock()
+	defer as.resultMetricsLock.Unlock()
+	if as.resultMetricsRun == runID {
+		as.resultMetricsRun = ""
 	}
 }
 
 func (as *AgentServer) makePromMetrics(event metricEvent) {
-	as.labelsLock.Lock()
-	labels, ok := as.labelsByRun[event.runID]
-	if !ok {
-		as.labelsLock.Unlock()
+	as.resultMetricsLock.Lock()
+	defer as.resultMetricsLock.Unlock()
+	if as.resultMetricsRun == "" || as.resultMetricsRun != event.runID {
 		return
 	}
-	defer as.labelsLock.Unlock()
 
 	metricParser := as.options.MetricParser
 	metric, err := metricParser(event.line)
@@ -178,8 +182,7 @@ func (as *AgentServer) makePromMetrics(event metricEvent) {
 		return
 	}
 
-	identity := identityFromMeta(as.options.EngineMeta, event.runID)
-	if err := recordRequestSample(as.metrics, labels, as.labelsUsageLimit, &identity, completeRequestSample(metric), true); err != nil {
+	if err := as.resultRecorder.RecordEvent(metric); err != nil {
 		log.Error(err)
 	}
 }
@@ -213,11 +216,7 @@ func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
 			if line == nil || line.Err != nil {
 				continue
 			}
-			select {
-			case <-ctx.Done():
-				return
-			case as.bus <- metricEvent{runID: runID, line: line.Text}:
-			}
+			as.makePromMetrics(metricEvent{runID: runID, line: line.Text})
 		}
 	}
 }
@@ -488,6 +487,9 @@ func (as *AgentServer) isSubscribed() bool {
 
 func (as *AgentServer) validateMetricsOptions() error {
 	options := as.options
+	if as.resultRecorderErr != nil {
+		return as.resultRecorderErr
+	}
 	if options.LabelsUsageLimit < 0 {
 		return fmt.Errorf("metrics label limit must be nonnegative")
 	}

@@ -305,8 +305,12 @@ one of these modes:
   Each parser call receives a line and returns `agent.ShibuyaMetric` or an error.
   Map request label, status, latency in milliseconds, received bytes into
   `EgressBytes`, and current concurrency into `Threads`. The runtime supplies
-  run identity and accumulates metrics; parser errors drop the event. Never
-  feed cumulative snapshots into a per-request event parser.
+  run identity and records through its own `MetricsRecorder`; parser errors drop
+  the event. The SDK resets the recorder on successful launch and retains final
+  metrics until the next successful launch. It joins ingestion before releasing
+  the run and rejects stale events. Do not create another recorder or reset the
+  registry in this mode. Never feed cumulative snapshots into a per-request
+  event parser.
 - **SDK recorder updates:** supply a `MetricsRegistry` and optionally
   `CustomIngestMetrics`; leave parser and native options unset. Normalize samples
   and use a `MetricsRecorder` configured with the resolved budget.

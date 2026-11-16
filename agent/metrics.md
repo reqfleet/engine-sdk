@@ -83,6 +83,16 @@ Use `MetricsRecorder` for adapter-produced samples, binding identity once from
 are removed: move calls to the recorder, handle its validation errors, and remove
 adapter-owned request admission. Result-file parsers use `MetricParser` unchanged.
 
+Result-file ingestion owns an SDK `MetricsRecorder` and sends parsed events through
+`RecordEvent`. On each successful process launch, before ingestion and resource
+sampling start, the SDK resets that recorder and binds the assigned run identity.
+This clears all previous-run series, admission, collection errors, and resource
+baseline. Preparation or launch failure does not reset it. Shutdown joins the
+tailer, including in-flight parsing and recording, then rejects further events for
+that run without clearing its final metrics. Completed values remain available
+until the next successful launch. Adapters keep `MetricParser` unchanged and must
+not create a second recorder or reset the registry for result-file ingestion.
+
 #### Run-scoped recorder
 
 `agent.NewMetricsRecorder(registry, options.LabelsUsageLimit)` returns a recorder
@@ -140,8 +150,8 @@ err := recorder.ObserveLatency(metric) // milliseconds; identity comes from Rese
 ```
 
 `recorder.RecordEvent(metric)` selects all four measurements and preserves
-result-file event histogram routing. Both entry points share the SDK's
-result-file source-sample implementation: validate the original name, call
+result-file event histogram routing. Result-file ingestion calls this method;
+`RecordSample` uses the same implementation: validate the original name, call
 `metricschema.AdmitRequestName` once, and use that admitted name for every
 request-labelled measurement present. An oversized label returns an error,
 consumes no slot, and updates no measurement, including sample-carried concurrency.
@@ -212,14 +222,16 @@ coordinator-requested stop, including scheduled completion. Live and final
 collection calls never overlap, and the workspace is not released until final
 collection completes.
 
-Retain completed-run values for final scrapes until the caller invokes
-`recorder.Reset(run)` for the next run. For registry-only/result-file integrations,
-`registry.Reset()` retains its low-level behavior: it clears all series,
-collection errors, and resource identity/baseline. The SDK assigns resource
-identity and clears collection errors on successful launch, without clearing
-collected values. Without an explicit reset, prior-run series remain separately
-labelled. Never reset during an active run. Recording and gathering are
-concurrency-safe, but a scrape is not a transaction across independent updates.
+For adapter-owned ingestion, retain completed-run values for final scrapes until
+the caller invokes `recorder.Reset(run)` for the next run. Result-file ingestion
+performs that transition automatically on successful launch, as described above.
+For registry-only integrations, `registry.Reset()` retains its low-level behavior:
+it clears all series, collection errors, and resource identity/baseline. The SDK
+assigns resource identity and clears collection errors on successful launch,
+without clearing registry-only collected values. Without an explicit reset,
+those prior-run series remain separately labelled. Never reset during an active
+run. Recording and gathering are concurrency-safe, but a scrape is not a
+transaction across independent updates.
 
 HTTP only gathers the current registry: it does not read files, sample resources,
 or invoke callbacks. Before any samples, it may return an empty exposition;

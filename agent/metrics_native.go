@@ -26,10 +26,18 @@ func (as *AgentServer) startMetricsRun(runID string) {
 		return
 	}
 	if as.options.MetricsURL == "" {
-		as.metrics.startResourceRun(as.options.EngineMeta, runID)
-		as.labelsLock.Lock()
-		as.labelsByRun[runID] = make(map[string]struct{})
-		as.labelsLock.Unlock()
+		if as.usesResultFileMetrics() {
+			as.resultMetricsLock.Lock()
+			defer as.resultMetricsLock.Unlock()
+			meta := as.options.EngineMeta
+			as.resultRecorder.Reset(RunContext{
+				RunID: runID, CollectionID: meta.CollectionID, PlanID: meta.PlanID,
+				AgentID: meta.EngineID, Zone: meta.Zone,
+			})
+			as.resultMetricsRun = runID
+		} else {
+			as.metrics.startResourceRun(as.options.EngineMeta, runID)
+		}
 	} else if as.options.FoldNativeMetrics {
 		as.nativeMetricsLock.Lock()
 		as.nativeMetricsRun = runID

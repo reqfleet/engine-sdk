@@ -99,6 +99,12 @@
 // until the caller explicitly resets, for example in the next BeforeStart.
 // There are no global collectors. Registry Reset remains a low-level
 // collector/resource reset, not a recorder transition. Never reset an active run.
+// Result-file ingestion owns an SDK recorder and calls RecordEvent after parsing.
+// The SDK resets it on each successful process launch, before ingestion and
+// resource sampling; preparation or launch failures retain the previous snapshot.
+// Shutdown joins parsing and recording, rejects late events for the finished run,
+// and retains final metrics until the next successful launch. Result-file adapters
+// keep MetricParser unchanged and do not reset or construct another recorder.
 // CustomIngestMetrics lets adapters normalize independent engine samples that
 // do not fit MetricParser's complete-request event model. The SDK runs it after
 // launch and every 250ms, separately from Observe and Progress.

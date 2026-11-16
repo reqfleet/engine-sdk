@@ -91,9 +91,7 @@ func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 	emit(runID, "others")
 	emit(runID, strings.Repeat("x", 1024))
 	emit("stale-run", "stale")
-	as.labelsLock.Lock()
-	delete(as.labelsByRun, runID)
-	as.labelsLock.Unlock()
+	as.finishResultMetricsRun(runID)
 	emit(runID, "first")
 
 	families, err := as.MetricsRegistry().Gather()

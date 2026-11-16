@@ -40,7 +40,6 @@ func (as *AgentServer) Run() error {
 			as.listenToCoordinator(msgChan)
 		}
 	}()
-	go as.handleMetricStream()
 	return as.startHTTPServer()
 }
 
