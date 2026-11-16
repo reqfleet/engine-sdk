@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"math"
 	"sync"
 
 	"github.com/reqfleet/engine-sdk/metricschema"
@@ -91,6 +92,30 @@ func (r *MetricsRecorder) RecordSample(sample RequestSample) error {
 // validation and admission. It uses the ordinary histogram even for llm_resp.
 func (r *MetricsRecorder) ObserveLatency(metric ShibuyaMetric) error {
 	return r.RecordSample(RequestSample{Metric: metric, HasLatency: true})
+}
+
+// ObserveLLMResponse records only an independent LLM response duration in
+// milliseconds, including measured zero. Nonfinite or negative values return an
+// error without changing admission or metrics. The reserved llm_resp name shares
+// request-name admission; overflow remains in the wide LLM response histogram.
+// Identity comes from Reset. No status, bytes, concurrency, or ordinary latency
+// measurements are recorded.
+func (r *MetricsRecorder) ObserveLLMResponse(latencyMS float64) error {
+	if latencyMS < 0 || math.IsNaN(latencyMS) || math.IsInf(latencyMS, 0) {
+		return errors.New("LLM response latency must be finite and nonnegative")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registry.mu.RLock()
+	defer r.registry.mu.RUnlock()
+
+	metric := ShibuyaMetric{
+		Label:   metricschema.AdmitRequestName(metricschema.LLMResponseLabel, r.admitted, r.limit, ""),
+		Latency: latencyMS,
+	}
+	r.identity.bind(&metric)
+	r.registry.observeLatency(metric, r.registry.labelLLMRespLatencyHistogram)
+	return nil
 }
 
 // RecordStatus increments only metric.Status's counter after request-name

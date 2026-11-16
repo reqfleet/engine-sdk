@@ -110,6 +110,24 @@ These methods return an error for an invalid request label and delegate to
 They do not record unselected fields. `ObserveLatency` and `ObserveRequest` use
 the ordinary histogram even when the admitted name is `llm_resp`.
 
+`recorder.ObserveLLMResponse(latencyMS float64) error` records only an independent
+LLM response duration in milliseconds, without conversion. It rejects negative,
+NaN, or infinite values before admission or any collector update; measured zero
+is valid. It uses the assigned identity and admits the reserved lowercase
+`metricschema.LLMResponseLabel` (`llm_resp`) through the same first-N request-name
+budget as HTTP, TTFT, status, and request-byte samples. At zero or exhausted
+budget the label becomes `others`, but the observation stays in the wide
+`shibuya_latency_llm_resp_milliseconds` family. It creates no ordinary latency,
+status outcome, received bytes, or concurrency. Its cumulative observations and
+admission remain available for final scrapes and reset with `recorder.Reset(run)`.
+
+For independent TTFT, validate a finite nonnegative millisecond value at the
+source and call `ObserveLatency` with `Label: metricschema.TTFTLabel` (`ttft`).
+The ordinary histogram and shared admission apply. Neither timing API infers
+measurements from HTTP metadata; omit unavailable timings rather than supplying
+zero. An ordinary HTTP request named `llm_resp` still uses the ordinary histogram
+through `ObserveRequest`, `ObserveLatency`, or `RecordSample`.
+
 `recorder.RecordSample(agent.RequestSample{...})` accepts a `Metric` and explicit
 `HasLatency`, `HasStatus`, `HasReceivedBytes`, and `HasConcurrency` flags. Set only
 the flags for measurements present in that source sample. Zero is a real
@@ -128,8 +146,8 @@ result-file source-sample implementation: validate the original name, call
 request-labelled measurement present. An oversized label returns an error,
 consumes no slot, and updates no measurement, including sample-carried concurrency.
 Discard that sample; reporting rejection does not itself fail the workload.
-Engine-specific parsing, numeric validation, unit conversion, and attribution
-remain adapter-owned.
+Engine-specific parsing, numeric validation (except the explicit
+`ObserveLLMResponse` check), unit conversion, and attribution remain adapter-owned.
 
 For bytes attributed to a request, use `AddReceivedBytes`, or select
 `HasReceivedBytes` when including bytes in a multi-measurement `RecordSample`.
@@ -299,12 +317,15 @@ components. The base family name is not itself a sample series. Preserve these
 historical names rather than adding `_total` or changing the byte-counter name.
 
 Use lowercase reserved labels `ttft` and `llm_resp` for optional LLM timing.
-The runtime routes `llm_resp` events into the separate wide histogram (its routing
-comparison is case-insensitive, but reporting selectors use the lowercase label).
+The runtime routes `llm_resp` complete events into the separate wide histogram
+after admission (its routing comparison is case-insensitive, but reporting
+selectors use the lowercase label). This legacy event routing is unchanged:
+an event folded into `others` uses the ordinary histogram. In contrast,
+`ObserveLLMResponse` explicitly preserves wide-family routing under overflow.
 `ttft` uses the ordinary histogram. Omit unavailable optional LLM observations;
-do not emit a fabricated zero timing. Status and byte counters still reflect the
-events the adapter records; synthetic timing events must not be assumed to be
-additional HTTP requests without understanding that adapter's event model.
+do not emit a fabricated zero timing. Independent timing methods record only
+their histograms. Complete events also record status, bytes, and concurrency;
+do not manufacture complete events for independently measured timings.
 
 ## Request-label validation
 
