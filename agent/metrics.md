@@ -101,7 +101,7 @@ Use the named recorder methods for independently available measurements:
 | Method | Measurements recorded |
 | --- | --- |
 | `ObserveLatency(metric)` | Only ordinary request latency, including a measured zero |
-| `RecordStatus(metric)` | Only one supplied status event, including a received token under `tps` |
+| `RecordStatus(metric)` | Only one supplied status event |
 | `ObserveRequest(metric)` | Ordinary request latency and one status outcome together |
 | `AddReceivedBytes(metric)` | Only bytes attributed to the named request |
 
@@ -121,17 +121,24 @@ budget the label becomes `others`, but the observation stays in the wide
 status outcome, received bytes, or concurrency. Its cumulative observations and
 admission remain available for final scrapes and reset with `recorder.Reset(run)`.
 
-For independent TTFT, validate a finite nonnegative millisecond value at the
-source and call `ObserveLatency` with `Label: metricschema.TTFTLabel` (`ttft`).
-The ordinary histogram and shared admission apply. Neither timing API infers
-measurements from HTTP metadata; omit unavailable timings rather than supplying
-zero. An ordinary HTTP request named `llm_resp` still uses the ordinary histogram
-through `ObserveRequest`, `ObserveLatency`, or `RecordSample`.
+`recorder.ObserveTTFT(latencyMS float64) error` and
+`recorder.ObserveInterTokenLatency(latencyMS float64) error` record independent
+millisecond timings in the ordinary histogram under `metricschema.TTFTLabel`
+(`ttft`) and `metricschema.TPSLabel` (`tps`), respectively. Like
+`ObserveLLMResponse`, both reject negative, NaN, or infinite values before
+admission, accept measured zero, and create no status, bytes, or concurrency.
+All timing methods share assigned identity, admission, retention, and reset.
+They do not infer measurements from HTTP metadata or token counts; omit
+unavailable timings rather than supplying zero. An ordinary HTTP request named
+`llm_resp` still uses the ordinary histogram through `ObserveRequest`,
+`ObserveLatency`, or `RecordSample`.
 
-For independent TPS, call `RecordStatus` once per genuinely received generated
-token with `Label: "tps"` and `Status: "200"`, including the first token.
-This records a successful token-receipt event, not an HTTP response, timing or byte sample.
-The [engine-neutral LLM contract](#llm-streaming-metrics) defines token cardinality,
+For independent TPS, call `recorder.RecordReceivedToken() error` once per genuinely
+received generated token, including the first. The SDK supplies
+`metricschema.TPSLabel` (`tps`) and status `200`, sharing the timing/request
+admission budget. This records only a successful token-receipt event, not an HTTP
+response, timing, byte, or concurrency sample. The
+[engine-neutral LLM contract](#llm-streaming-metrics) defines token cardinality,
 optional inter-token timing and independent bandwidth reporting.
 
 `recorder.RecordSample(agent.RequestSample{...})` accepts a `Metric` and explicit
@@ -152,8 +159,8 @@ result-file source-sample implementation: validate the original name, call
 request-labelled measurement present. An oversized label returns an error,
 consumes no slot, and updates no measurement, including sample-carried concurrency.
 Discard that sample; reporting rejection does not itself fail the workload.
-Engine-specific parsing, numeric validation (except the explicit
-`ObserveLLMResponse` check), unit conversion, and attribution remain adapter-owned.
+Engine-specific parsing, numeric validation (except the explicit LLM timing
+method checks), unit conversion, and attribution remain adapter-owned.
 
 For bytes attributed to a request, use `AddReceivedBytes`, or select
 `HasReceivedBytes` when including bytes in a multi-measurement `RecordSample`.
@@ -408,11 +415,11 @@ preventing genuine token events from being counted.
 
 For independent observations, use the run-bound recorder:
 
-- TTFT: `ObserveLatency` with `Label: metricschema.TTFTLabel`.
+- TTFT: `ObserveTTFT(latencyMS)`, which selects the ordinary family under `ttft`.
 - Response latency: `ObserveLLMResponse(latencyMS)`, which selects the wide family.
-- Received token: `RecordStatus` with `Label: "tps"` and `Status: "200"`,
-  exactly once per token, including the first.
-- Optional inter-token gap: `ObserveLatency` with `Label: "tps"`.
+- Received token: `RecordReceivedToken()`, exactly once per token, including the first.
+- Optional inter-token gap: `ObserveInterTokenLatency(latencyMS)`, which selects
+  the ordinary family under `tps`.
 - Received bytes: `AddReceivedBytes` for request-attributed bytes or
   `AddAggregateReceivedBytes` for a bounded source-specific aggregate label,
   independently of token recording.
@@ -420,7 +427,7 @@ For independent observations, use the run-bound recorder:
 For example, each genuine token observation records only:
 
 ```go
-err := recorder.RecordStatus(agent.ShibuyaMetric{Label: "tps", Status: "200"})
+err := recorder.RecordReceivedToken()
 ```
 
 `200` is the normalized successful token-event outcome, not a fabricated
@@ -441,7 +448,7 @@ have been received.
 Native producers emit equivalent cumulative token counts directly, not current
 rates, batch sizes or a count of scrapes. Preserve a genuine cumulative
 received-token source as a cumulative counter; never add its whole value again
-on each scrape or pass it through `RecordStatus` as though it were one token.
+on each scrape or pass it through `RecordReceivedToken` as though it were one token.
 Receipt samples instead contribute exactly one increment each. A completion-only
 total cannot establish live received-token throughput.
 
@@ -465,14 +472,25 @@ Apply the existing cumulative retention, final-drain and reset contracts.
 
 ### Engine mappings and compatibility
 
+The SDK's `metricschema` package owns the shared instrumentation source names:
+`LLMResponseDurationMetric` (`llm_response_duration`),
+`LLMTimeToFirstTokenMetric` (`llm_time_to_first_token`),
+`LLMTokenEventsMetric` (`llm_token_events`), and
+`LLMInterTokenDurationMetric` (`llm_inter_token_duration`). Adapters using these
+sources import the constants directly, without local definitions or aliases.
+The timing sources supply milliseconds; token points each represent one received
+generated token. These are source names, not normalized Prometheus family names
+or request labels. They do not enable ingestion or instrument an engine by
+themselves; source selection and native-output parsing remain adapter-owned.
+
 Each adapter MUST document its native source fields, units/conversions, selectors,
 protocol completion, generated-token detection and cardinality evidence,
 independent byte-source boundaries/exclusions and unsupported measurements.
 These choices may differ across k6, Locust, JMeter, Replay and other engines;
 the normalized meanings above do not. Custom counters require genuine client
 instrumentation; selecting a metric does not add streaming support to stock k6
-or any other engine. No streaming extension or new recorder API is required by
-this contract.
+or any other engine. The recorder methods encode reporting semantics, not
+streaming support.
 Verify representative successful and failed/interrupted streams, multibyte payloads,
 first-token accounting, batched events, excluded controls/failure markers, missing
 observations, independent nonoverlapping bytes, no synthetic request outcomes,
@@ -486,9 +504,8 @@ not migrate those integrations or reinterpret historical data. To report
 independent LLM measurements with the semantics above, adapt the source mapping
 and use the recorder or a conforming normalized producer; verify each engine
 before claiming support. Do not require older images to change merely because a
-coordinator is upgraded. This correction describes the existing token-count
-chart; it introduces no new family, required timing metric, recorder API, protocol
-negotiation or automatic conformance enforcement.
+coordinator is upgraded. The token-count chart requires no new family, required
+timing metric, protocol negotiation or automatic conformance enforcement.
 
 ## Request-label validation
 

@@ -85,6 +85,10 @@
 // ObserveLLMResponse records an independent, finite nonnegative millisecond timing
 // in the wide LLM response histogram, even when shared admission folds llm_resp
 // into others; it creates no ordinary latency, status, bytes, or concurrency.
+// ObserveTTFT and ObserveInterTokenLatency validate independent millisecond
+// timings and use the ordinary histogram under ttft and tps. RecordReceivedToken
+// counts one received generated token under tps with status 200, without timing,
+// bytes, or concurrency. All share recorder admission and assigned identity.
 // ObserveRequest records latency and status together; RecordEvent handles complete
 // events. Omit unavailable measurements rather than fabricating zero values.
 // MetricsRecorder owns synchronized assigned identity and request-name admission

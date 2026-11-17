@@ -118,6 +118,37 @@ func (r *MetricsRecorder) ObserveLLMResponse(latencyMS float64) error {
 	return nil
 }
 
+// ObserveTTFT records only the measured time to the first generated token, in
+// milliseconds, under ttft in the ordinary histogram. Nonfinite or negative
+// values return an error before admission; measured zero is valid.
+// Identity and request-name admission are shared with all other observations.
+func (r *MetricsRecorder) ObserveTTFT(latencyMS float64) error {
+	if latencyMS < 0 || math.IsNaN(latencyMS) || math.IsInf(latencyMS, 0) {
+		return errors.New("TTFT latency must be finite and nonnegative")
+	}
+	return r.ObserveLatency(ShibuyaMetric{Label: metricschema.TTFTLabel, Latency: latencyMS})
+}
+
+// ObserveInterTokenLatency records only a measured gap between successive
+// generated tokens in the same generation, in milliseconds, under tps in the
+// ordinary histogram. The first token has no gap. Nonfinite or negative values
+// return an error before admission; measured zero is valid. It does not count a
+// token. Identity and request-name admission are shared with other observations.
+func (r *MetricsRecorder) ObserveInterTokenLatency(latencyMS float64) error {
+	if latencyMS < 0 || math.IsNaN(latencyMS) || math.IsInf(latencyMS, 0) {
+		return errors.New("inter-token latency must be finite and nonnegative")
+	}
+	return r.ObserveLatency(ShibuyaMetric{Label: metricschema.TPSLabel, Latency: latencyMS})
+}
+
+// RecordReceivedToken counts exactly one genuinely received generated token,
+// including the first, under tps with status 200. This denotes successful token
+// receipt, not an HTTP response. It records no timing, bytes, or concurrency.
+// Identity and request-name admission are shared with all other observations.
+func (r *MetricsRecorder) RecordReceivedToken() error {
+	return r.RecordStatus(ShibuyaMetric{Label: metricschema.TPSLabel, Status: "200"})
+}
+
 // RecordStatus increments only metric.Status's counter after request-name
 // validation and admission; it does not fabricate a latency observation.
 func (r *MetricsRecorder) RecordStatus(metric ShibuyaMetric) error {
