@@ -1,5 +1,6 @@
-// Package metricschema defines metric names, ordered Prometheus labels, histogram
-// boundaries, and request-name admission for shibuya-v1 without depending on collectors.
+// Package metricschema defines metric names, shared LLM instrumentation source
+// names, ordered Prometheus labels, histogram boundaries, and request-name
+// admission for shibuya-v1 without depending on collectors.
 package metricschema
 
 const (
@@ -72,6 +73,20 @@ const (
 	TTFTLabel = "ttft"
 	// TPSLabel identifies received-token counts and optional inter-token timings.
 	TPSLabel = "tps"
+)
+
+// Shared LLM instrumentation source names are distinct from normalized metric
+// families and request labels. Adapters select and ingest these sources using
+// the engine's native instrumentation and output format.
+const (
+	// LLMResponseDurationMetric supplies complete LLM response timings in milliseconds.
+	LLMResponseDurationMetric = "llm_response_duration"
+	// LLMTimeToFirstTokenMetric supplies first generated token timings in milliseconds.
+	LLMTimeToFirstTokenMetric = "llm_time_to_first_token"
+	// LLMTokenEventsMetric supplies one point per received generated token.
+	LLMTokenEventsMetric = "llm_token_events"
+	// LLMInterTokenDurationMetric supplies millisecond gaps from the second token onward.
+	LLMInterTokenDurationMetric = "llm_inter_token_duration"
 )
 
 // LatencyLabels returns a fresh, caller-owned slice of ordered histogram labels.

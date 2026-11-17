@@ -472,6 +472,17 @@ Apply the existing cumulative retention, final-drain and reset contracts.
 
 ### Engine mappings and compatibility
 
+The SDK's `metricschema` package owns the shared instrumentation source names:
+`LLMResponseDurationMetric` (`llm_response_duration`),
+`LLMTimeToFirstTokenMetric` (`llm_time_to_first_token`),
+`LLMTokenEventsMetric` (`llm_token_events`), and
+`LLMInterTokenDurationMetric` (`llm_inter_token_duration`). Adapters using these
+sources import the constants directly, without local definitions or aliases.
+The timing sources supply milliseconds; token points each represent one received
+generated token. These are source names, not normalized Prometheus family names
+or request labels. They do not enable ingestion or instrument an engine by
+themselves; source selection and native-output parsing remain adapter-owned.
+
 Each adapter MUST document its native source fields, units/conversions, selectors,
 protocol completion, generated-token detection and cardinality evidence,
 independent byte-source boundaries/exclusions and unsupported measurements.
