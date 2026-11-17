@@ -70,6 +70,8 @@ const (
 	LLMResponseLabel = "llm_resp"
 	// TTFTLabel identifies time-to-first-token measurements.
 	TTFTLabel = "ttft"
+	// TPSLabel identifies received-token counts and optional inter-token timings.
+	TPSLabel = "tps"
 )
 
 // LatencyLabels returns a fresh, caller-owned slice of ordered histogram labels.

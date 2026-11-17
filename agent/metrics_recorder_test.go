@@ -658,7 +658,7 @@ func TestMetricsRecorderLLMResponseSharesHTTPAndTTFTAdmission(t *testing.T) {
 						case metricschema.LLMResponseLabel:
 							require.NoError(t, recorder.ObserveLLMResponse(15000))
 						case metricschema.TTFTLabel:
-							require.NoError(t, recorder.ObserveLatency(ShibuyaMetric{Label: label, Latency: 5}))
+							require.NoError(t, recorder.ObserveTTFT(5))
 						default:
 							require.NoError(t, recorder.ObserveRequest(ShibuyaMetric{Label: label, Status: "200", Latency: 10}))
 						}
