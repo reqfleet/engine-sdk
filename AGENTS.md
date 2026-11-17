@@ -45,8 +45,10 @@ adapter is supplied here.
   units, labels, histogram boundaries, and accumulation semantics; do not copy
   those definitions into a second specification.
 - The [LLM streaming contract](agent/metrics.md#llm-streaming-metrics) defines
-  `ttft`, `llm_resp` and historical byte-based `tps` semantics for every engine.
-  Keep native source selection and instrumentation in adapter documentation.
+  `ttft`, `llm_resp` and received-token `tps` semantics for every engine.
+  Record one status-counter increment per genuine received token, independently
+  of bandwidth and optional timing; transport chunks alone do not establish token
+  cardinality. Keep source selection and instrumentation in adapter documentation.
   Optional support must be verified per engine; a shared specification does not
   make existing images conform or change their legacy event behavior.
 - Adapter imports are limited to the public SDK packages below. Do not depend on
