@@ -182,9 +182,9 @@ store with a fixed nonnegative budget; a negative limit returns an error.
 overflow. Callers must validate source names before admission. The recorder does
 that validation for its callers, so do not pre-admit recorder samples.
 
-The store uses a read lock for membership and exhausted-budget checks, and an
-exclusive lock for insertion after rechecking membership and capacity. There is
-no reset operation. The registry needs no recording/reset lock to protect run
+`Admit` holds one exclusive store lock for the complete membership, capacity,
+and insertion decision. There is no reset operation.
+The registry needs no recording/reset lock to protect run
 transitions: identity and ownership never change. Collectors and collection-error
 access remain concurrency-safe. Gathering is not a transaction across independent
 measurements or selected families of a sample.

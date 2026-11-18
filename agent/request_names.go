@@ -38,27 +38,9 @@ func newRequestsNamesStore(limit int, overflow string) *RequestsNamesStore {
 // concurrent use. Callers must validate the source name before admission.
 // Only admitted names are retained; new keys do not retain source-record buffers.
 func (s *RequestsNamesStore) Admit(name string) string {
-	if name == s.overflow || s.limit == 0 {
-		return s.overflow
-	}
-	s.mu.RLock()
-	if _, admitted := s.names[name]; admitted {
-		s.mu.RUnlock()
-		return name
-	}
-	if len(s.names) >= s.limit {
-		s.mu.RUnlock()
-		return s.overflow
-	}
-	s.mu.RUnlock()
-
-	// The read lock is released: inserting a new name needs exclusive access.
-	// RWMutex cannot upgrade a read lock, so admission must be rechecked below.
 	s.mu.Lock()
-	// Another producer may have admitted this name or consumed the last slot.
-	admitted := metricschema.AdmitRequestName(name, s.names, s.limit, s.overflow)
-	s.mu.Unlock()
-	return admitted
+	defer s.mu.Unlock()
+	return metricschema.AdmitRequestName(name, s.names, s.limit, s.overflow)
 }
 
 func (s *RequestsNamesStore) contains(name string) bool {
