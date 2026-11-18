@@ -288,6 +288,7 @@ func (as *AgentServer) initializeWorkspace(run *agentRun) error {
 	return nil
 }
 
+// Callers check cancellation before advancing preparation or startup.
 func (as *AgentServer) prepareDependencies(run *agentRun) error {
 	if err := run.ctx.Err(); err != nil {
 		return newDependencyStartupFailure(err)
@@ -318,7 +319,7 @@ func (as *AgentServer) prepareDependencies(run *agentRun) error {
 			return newDependencyStartupFailure(err)
 		}
 	}
-	return run.ctx.Err()
+	return nil
 }
 
 func (as *AgentServer) fetchRunFile(run *agentRun, remote, local string) error {
@@ -384,10 +385,8 @@ func (as *AgentServer) observeRun(ctx context.Context, run *agentRun) {
 		probeCtx, cancel := context.WithTimeout(ctx, ObservationTimeout)
 		observation, err := as.options.Observe(probeCtx, run.context)
 		cancel()
-		if ctx.Err() != nil {
-			return
-		}
 		as.stateLock.Lock()
+		// Monitor cancellation follows run cancellation or process exit.
 		if run.ctx.Err() != nil || run.exited {
 			as.stateLock.Unlock()
 			return

@@ -193,6 +193,49 @@ func TestMissingDeclarationReconcilesBeforeLaunch(t *testing.T) {
 	assert.Zero(t, starts.Load())
 }
 
+func TestCanceledDependencyPreparationCannotAdvanceStartup(t *testing.T) {
+	for _, verb := range []string{protocol.VerbPrepare, protocol.VerbStart} {
+		t.Run(verb, func(t *testing.T) {
+			entered := make(chan struct{})
+			prepared := filepath.Join(t.TempDir(), "prepared")
+			launched := filepath.Join(t.TempDir(), "launched")
+			f := newAgentFixture(t, AgentServerOptions{
+				PrepareDependencies: func(ctx context.Context, _ RunContext) error {
+					close(entered)
+					<-ctx.Done()
+					return nil
+				},
+				BeforeStart: func(context.Context, RunContext) error {
+					return os.WriteFile(prepared, nil, 0600)
+				},
+				BuildCommand: func(context.Context, RunContext) (Command, error) {
+					return Command{Command: "touch", Args: []string{launched}}, nil
+				},
+			}, nil)
+			dependency := ""
+			if verb == protocol.VerbPrepare {
+				dependency = "requirements.txt"
+			}
+			f.send(runMessage(verb, "run-1", dependency))
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("dependency preparation did not start")
+			}
+			f.server.stopRun("run-1", protocol.StopCanceled)
+			status := waitRunState(t, f, "run-1", protocol.RunCanceled)
+			assert.Equal(t, protocol.StartupStateCanceled, status.StartupStatus)
+			if verb == protocol.VerbPrepare {
+				assert.Equal(t, protocol.PreparationStateCanceled, f.server.getPreparationProgress().Status)
+			}
+			for _, path := range []string{prepared, launched} {
+				_, err := os.Stat(path)
+				assert.ErrorIs(t, err, os.ErrNotExist)
+			}
+		})
+	}
+}
+
 func TestCancellationWaitsForPreparationRollback(t *testing.T) {
 	entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	f := newAgentFixture(t, AgentServerOptions{PrepareDependencies: func(ctx context.Context, run RunContext) error {
