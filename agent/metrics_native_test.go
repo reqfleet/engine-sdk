@@ -189,6 +189,15 @@ func TestNativeMetricsReplayOverflowConvention(t *testing.T) {
 	assert.Equal(t, map[string]float64{"a/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
 	publish(nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{"a", "200", 1, 1}, {"_other_", "200", 1, 1}, {"b", "200", 1, 1}, {"others", "200", 1, 1}}))
 	assert.Equal(t, map[string]float64{"a/200": 1, "_other_/200": 3}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
+
+	t.Run("zero budget", func(t *testing.T) {
+		options := as.options
+		options.LabelsUsageLimit = 0
+		server := NewAgentServer(options)
+		startTestMetricsRun(t, server, "run")
+		assert.Equal(t, map[string]float64{"_other_/200": 4},
+			nativeCounters(nativeScrape(t, server.metricsHandler())[metricschema.StatusCounter]))
+	})
 }
 
 func TestNativeMetricsFinishAndNextRun(t *testing.T) {

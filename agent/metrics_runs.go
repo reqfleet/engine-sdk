@@ -32,7 +32,7 @@ func (as *AgentServer) prepareMetricsForRun(run *RunContext) {
 			// values across scrapes. The exporter still owns the counters.
 			as.nativeMetricsLock.Lock()
 			as.nativeMetricsRun = run.RunID
-			as.nativeLabels = make(map[string]struct{})
+			as.nativeRequestNames = newRequestsNamesStore(as.options.LabelsUsageLimit, as.options.NativeMetricsOverflowLabel)
 			as.nativeMetricsLock.Unlock()
 		}
 		return
@@ -40,7 +40,7 @@ func (as *AgentServer) prepareMetricsForRun(run *RunContext) {
 
 	// The request-name budget was validated before accepting this run. No
 	// fallible initialization remains after the workload process has started.
-	run.Metrics = newMetricsRecorder(*run, newRequestsNamesStore(as.options.LabelsUsageLimit))
+	run.Metrics = newMetricsRecorder(*run, newRequestsNamesStore(as.options.LabelsUsageLimit, ""))
 
 	as.metricsMu.Lock()
 	as.metricsByRun[run.RunID] = runMetricsEntry{recorder: run.Metrics, recording: true}

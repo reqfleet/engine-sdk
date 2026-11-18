@@ -91,9 +91,10 @@ type AgentServer struct {
 	metricsByRun map[string]runMetricsEntry
 
 	// Native admission survives run completion for the final upstream scrape.
-	nativeMetricsLock sync.Mutex
-	nativeMetricsRun  string
-	nativeLabels      map[string]struct{}
+	// Serialize whole folding transactions and run changes, not just name admission.
+	nativeMetricsLock  sync.Mutex
+	nativeMetricsRun   string
+	nativeRequestNames *RequestsNamesStore
 
 	// Subscription status
 	subStausMu            sync.RWMutex

@@ -9,11 +9,12 @@ import (
 
 // RequestsNamesStore owns stable request-name admission for one run. Construct it
 // with NewRequestsNamesStore; do not copy it. A new run needs a new store.
-// Names beyond the fixed budget use metricschema.OverflowRequestName.
+// NewRequestsNamesStore uses metricschema.OverflowRequestName for overflow.
 type RequestsNamesStore struct {
-	mu    sync.RWMutex
-	names map[string]struct{}
-	limit int
+	mu       sync.RWMutex
+	names    map[string]struct{}
+	limit    int
+	overflow string
 }
 
 // NewRequestsNamesStore creates an empty store with a nonnegative name budget.
@@ -22,20 +23,23 @@ func NewRequestsNamesStore(limit int) (*RequestsNamesStore, error) {
 	if limit < 0 {
 		return nil, errors.New("metrics request-name limit must be nonnegative")
 	}
-	return newRequestsNamesStore(limit), nil
+	return newRequestsNamesStore(limit, ""), nil
 }
 
 // newRequestsNamesStore requires a validated nonnegative budget.
-func newRequestsNamesStore(limit int) *RequestsNamesStore {
-	return &RequestsNamesStore{names: make(map[string]struct{}), limit: limit}
+func newRequestsNamesStore(limit int, overflow string) *RequestsNamesStore {
+	if overflow == "" {
+		overflow = metricschema.OverflowRequestName
+	}
+	return &RequestsNamesStore{names: make(map[string]struct{}), limit: limit, overflow: overflow}
 }
 
 // Admit returns name if admitted, or the reserved overflow name. It is safe for
 // concurrent use. Callers must validate the source name before admission.
 // Only admitted names are retained; new keys do not retain source-record buffers.
 func (s *RequestsNamesStore) Admit(name string) string {
-	if name == metricschema.OverflowRequestName || s.limit == 0 {
-		return metricschema.OverflowRequestName
+	if name == s.overflow || s.limit == 0 {
+		return s.overflow
 	}
 	s.mu.RLock()
 	if _, admitted := s.names[name]; admitted {
@@ -44,13 +48,32 @@ func (s *RequestsNamesStore) Admit(name string) string {
 	}
 	if len(s.names) >= s.limit {
 		s.mu.RUnlock()
-		return metricschema.OverflowRequestName
+		return s.overflow
 	}
 	s.mu.RUnlock()
 
+	// The read lock is released: inserting a new name needs exclusive access.
+	// RWMutex cannot upgrade a read lock, so admission must be rechecked below.
 	s.mu.Lock()
 	// Another producer may have admitted this name or consumed the last slot.
-	admitted := metricschema.AdmitRequestName(name, s.names, s.limit, "")
+	admitted := metricschema.AdmitRequestName(name, s.names, s.limit, s.overflow)
 	s.mu.Unlock()
 	return admitted
+}
+
+func (s *RequestsNamesStore) contains(name string) bool {
+	s.mu.RLock()
+	_, admitted := s.names[name]
+	s.mu.RUnlock()
+	return admitted
+}
+
+// rollback removes only a failed native scrape's tentative admissions. The
+// caller serializes whole scrapes so no other producer can observe those names.
+func (s *RequestsNamesStore) rollback(names []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, name := range names {
+		delete(s.names, name)
+	}
 }

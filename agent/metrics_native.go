@@ -71,7 +71,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 				return fmt.Errorf("duplicate upstream series in %s", name)
 			}
 			seen[key] = struct{}{}
-			if _, admitted := as.nativeLabels[label.GetValue()]; !admitted && label.GetValue() != overflow {
+			if label.GetValue() != overflow && !as.nativeRequestNames.contains(label.GetValue()) {
 				candidates = append(candidates, label.GetValue())
 			}
 		}
@@ -84,14 +84,12 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	admitted := candidates[:0]
 	committed := false
 	defer func() {
-		if !committed {
-			for _, name := range admitted {
-				delete(as.nativeLabels, name)
-			}
+		if !committed && len(admitted) > 0 {
+			as.nativeRequestNames.rollback(admitted)
 		}
 	}()
 	for _, name := range candidates {
-		if metricschema.AdmitRequestName(name, as.nativeLabels, as.options.LabelsUsageLimit, overflow) == name {
+		if as.nativeRequestNames.Admit(name) == name {
 			admitted = append(admitted, name)
 		}
 	}
@@ -111,7 +109,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 				metrics = append(metrics, metric)
 				continue
 			}
-			mapped := metricschema.AdmitRequestName(label.GetValue(), as.nativeLabels, as.options.LabelsUsageLimit, overflow)
+			mapped := as.nativeRequestNames.Admit(label.GetValue())
 			if mapped != label.GetValue() {
 				label.Value = &overflow
 			}

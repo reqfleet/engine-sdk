@@ -276,6 +276,13 @@ cost, plus per-run admission state. Only this fallback requires Prometheus text
 exposition (`text/plain; version=0.0.4`): the SDK requests that format with
 `Accept-Encoding: identity` and bounds each successful snapshot to
 `agent.MaxNativeMetricsBytes` (**16 MiB**).
+
+Native folding owns a separate `RequestsNamesStore` for each launched run,
+configured with `NativeMetricsOverflowLabel`. The native metrics lock serializes
+the complete scrape and run transitions; the store's lock protects name admission.
+Only a successful scrape commits new names, so a rejected scrape cannot consume
+slots or evict names admitted by earlier scrapes.
+
 The following format and validation guarantees apply only with folding enabled.
 Compressed responses, malformed
 exposition, unsafe request-series aggregation, oversized snapshots, and non-200
