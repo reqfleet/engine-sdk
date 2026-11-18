@@ -884,12 +884,14 @@ func TestMetricValidationRequestLabelByteLimit(t *testing.T) {
 		value string
 		valid bool
 	}{
-		{"ASCII 1023", strings.Repeat("x", 1023), true},
-		{"ASCII 1024", strings.Repeat("x", 1024), false},
-		{"ASCII 1025", strings.Repeat("x", 1025), false},
-		{"Unicode 1023", strings.Repeat("界", 341), true},
-		{"Unicode 1024", strings.Repeat("界", 341) + "x", false},
-		{"Unicode 1025", strings.Repeat("界", 341) + "é", false},
+		{"ASCII 254", strings.Repeat("x", 254), true},
+		{"ASCII 255", strings.Repeat("x", 255), true},
+		{"ASCII 256", strings.Repeat("x", 256), false},
+		{"ASCII 257", strings.Repeat("x", 257), false},
+		{"ASCII former maximum", strings.Repeat("x", 1023), false},
+		{"Unicode 255", strings.Repeat("界", 85), true},
+		{"Unicode 256", strings.Repeat("界", 85) + "x", false},
+		{"Unicode 257", strings.Repeat("界", 85) + "é", false},
 	}
 	// LLM labels have a closed reserved/folded vocabulary, tested separately;
 	// arbitrary boundary-length labels are valid only in the other families.

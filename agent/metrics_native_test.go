@@ -276,7 +276,8 @@ func TestNativeMetricsRejectsMalformedScrapesWithoutConsumingBudget(t *testing.T
 		"missing histogram sum":         withoutSum,
 		"fractional histogram count":    strings.Replace(histogram, `le="1"} 1`, `le="1"} 0.5`, 1),
 		"incompatible histogram bounds": incompatible,
-		"overlong label":                strings.Replace(counter, `label="a"`, `label="`+strings.Repeat("a", 1024)+`"`, 1),
+		"overlong ASCII label":          strings.Replace(counter, `label="a"`, `label="`+strings.Repeat("a", 256)+`"`, 1),
+		"overlong Unicode label":        strings.Replace(counter, `label="a"`, `label="`+strings.Repeat("界", 85)+`x"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			source, publish := nativeSource(t, invalid)

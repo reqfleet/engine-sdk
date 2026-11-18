@@ -2,7 +2,7 @@
 package agent
 
 import (
-	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 
@@ -32,7 +32,7 @@ func (sm ShibuyaMetric) LabelLength() int {
 // LabelIsValid checks the request-label byte limit defined by metricschema.
 func (sm ShibuyaMetric) LabelIsValid() (bool, error) {
 	if sm.LabelLength() > metricschema.MaxRequestLabelBytes {
-		return false, errors.New("exceed max label length 1024")
+		return false, fmt.Errorf("request label exceeds maximum length of %d bytes", metricschema.MaxRequestLabelBytes)
 	}
 	return true, nil
 }
