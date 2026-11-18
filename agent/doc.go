@@ -79,8 +79,8 @@
 // See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
 //
-// MetricsRegistry owns per-agent collectors and exposes gathering and collector
-// reset, not public recording methods. MetricsRecorder.ObserveLatency, RecordStatus,
+// MetricsRegistry owns per-run collectors and exposes gathering, not public
+// recording methods. MetricsRecorder.ObserveLatency, RecordStatus,
 // AddReceivedBytes, and SetConcurrency update independent measurements.
 // ObserveLLMResponse records an independent, finite nonnegative millisecond timing
 // in the wide LLM response histogram, even when shared admission folds llm_resp
@@ -91,25 +91,33 @@
 // bytes, or concurrency. All share recorder admission and assigned identity.
 // ObserveRequest records latency and status together; RecordEvent handles complete
 // events. Omit unavailable measurements rather than fabricating zero values.
-// MetricsRecorder owns synchronized assigned identity and request-name admission
-// using the same source-sample policy as result-file ingestion. RequestSample
-// presence flags prevent fabricated measurements; do not pre-admit request names.
-// Aggregate received bytes and independent concurrency bypass request admission.
-// Call recorder.Reset with the callback's RunContext before first ingestion and
-// each subsequent run; source identity is always ignored. This single transition
-// binds request/resource identity and resets admission, collectors, resource
-// baseline, and collection errors together. Quiesce prior-run callbacks and
-// ingestion first: reset is not cancellation. Completion retains final metrics
-// until the caller explicitly resets, for example in the next BeforeStart.
-// There are no global collectors. Registry Reset remains a low-level
-// collector/resource reset, not a recorder transition. Never reset an active run.
+// The SDK creates RunContext.Metrics only after successful process launch, before
+// starting postlaunch workers. It is nil in PrepareDependencies, BeforeStart and
+// BuildCommand; native handler/URL modes always supply nil. Identity and registry
+// ownership are immutable for its lifetime. Each launched SDK-managed run gets
+// fresh collectors, RequestsNamesStore, resource sampler and errors.
+// RequestSample presence flags prevent fabricated measurements; do not pre-admit
+// request names. Aggregate bytes and independent concurrency bypass admission.
+// Sample identity is always ignored, including when assigned fields are empty.
+// For standalone use, NewMetricsRecorder(run, requestNamesLimit) returns an
+// independent recorder and an error for a negative limit, without environment
+// loading or workers. Registry() returns its permanently bound registry.
+// There are no global collectors, registry injection or recorder reset operations.
+// Successful process launch, not readiness, publishes the new run's registry.
+// Completion retains its final snapshot until a new run ID is accepted through
+// prepare or start. Acceptance clears prior SDK output immediately; scrapes are
+// empty until launch, including after preparation or startup failure. Rejected,
+// duplicate and stale triggers do not clear output; matching prepare-to-start
+// does not clear again. A scrape already gathering an old registry finishes
+// there, without switching identity or collectors mid-scrape. Native exporter
+// output remains exporter-owned and is not cleared by this registry lifecycle.
 // CustomIngestMetrics lets adapters normalize independent engine samples that
 // do not fit MetricParser's complete-request event model. The SDK runs it after
 // launch and every 250ms, separately from Observe and Progress.
 // Honor cancellation; the SDK joins live callbacks and processes before
 // a final call with a fresh two-second context. Collection errors fail the run
-// and registry scrapes until reset or the next launch. Retain final metrics for
-// post-exit scrapes; HTTP requests never invoke collection.
+// and that run's registry scrapes. A later successful launch publishes a fresh
+// registry without those errors. HTTP requests never invoke collection.
 //
 // The SDK samples CPU/memory after launch, every five seconds, and once after
 // joining live monitors. The background worker stops at run termination and its
@@ -131,7 +139,12 @@
 // metricschema.AdmitRequestName shares the SDK's bounded, stable admission policy
 // with exporters; metricschema.OverflowRequestName names its reserved "others" series.
 // Exporters using that helper directly own synchronization, validation before
-// admission, and per-run reset; MetricsRecorder owns validation/admission locking.
+// admission, and per-run state. RequestsNamesStore provides synchronized first-N
+// admission with a fixed nonnegative budget and overflow-only behavior at zero.
+// Admit requires a validated source name; the recorder validates before admission.
+// Membership/full-budget checks use a read lock; insertion takes an exclusive
+// lock and rechecks. Recording and gathering are concurrency-safe, but a scrape
+// is not a transaction across independent measurements.
 // The SDK has no tier policy. Workloads inherit label_limit if present; Command.Env may override
 // it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce
 // their own configured limits.

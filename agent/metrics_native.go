@@ -21,23 +21,6 @@ import (
 // Default native proxying and MetricsHandler do not enforce this bound.
 const MaxNativeMetricsBytes = 16 << 20
 
-func (as *AgentServer) startMetricsRun(runID string) {
-	if as.options.MetricsHandler != nil {
-		return
-	}
-	if as.options.MetricsURL == "" {
-		as.metrics.startResourceRun(as.options.EngineMeta, runID)
-		as.labelsLock.Lock()
-		as.labelsByRun[runID] = make(map[string]struct{})
-		as.labelsLock.Unlock()
-	} else if as.options.FoldNativeMetrics {
-		as.nativeMetricsLock.Lock()
-		as.nativeMetricsRun = runID
-		as.nativeLabels = make(map[string]struct{})
-		as.nativeMetricsLock.Unlock()
-	}
-}
-
 func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	// Preserve upstream failures, including their status and body.
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
@@ -108,7 +91,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 		}
 	}()
 	for _, name := range candidates {
-		if metricschema.AdmitRequestName(name, as.nativeLabels, as.labelsUsageLimit, overflow) == name {
+		if metricschema.AdmitRequestName(name, as.nativeLabels, as.options.LabelsUsageLimit, overflow) == name {
 			admitted = append(admitted, name)
 		}
 	}
@@ -128,7 +111,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 				metrics = append(metrics, metric)
 				continue
 			}
-			mapped := metricschema.AdmitRequestName(label.GetValue(), as.nativeLabels, as.labelsUsageLimit, overflow)
+			mapped := metricschema.AdmitRequestName(label.GetValue(), as.nativeLabels, as.options.LabelsUsageLimit, overflow)
 			if mapped != label.GetValue() {
 				label.Value = &overflow
 			}

@@ -27,11 +27,11 @@ func TestMetricsIngestion(t *testing.T) {
 			return metric, err
 		},
 	})
-	as.startMetricsRun(runID)
+	startTestMetricsRun(t, as, runID)
 	as.makePromMetrics(metricEvent{runID: runID, line: `{"Label":"test-label","Status":"200","Latency":250,"EgressBytes":1024,"Threads":10}`})
 	gather := func() map[string]*dto.Metric {
 		t.Helper()
-		families, err := as.MetricsRegistry().Gather()
+		families, err := as.gatherMetrics()
 		require.NoError(t, err)
 		metrics := make(map[string]*dto.Metric)
 		for _, family := range families {
@@ -78,7 +78,7 @@ func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 			return metric, err
 		},
 	})
-	as.startMetricsRun(runID)
+	firstRun := startTestMetricsRun(t, as, runID)
 	emit := func(run, label string) {
 		t.Helper()
 		line, err := json.Marshal(ShibuyaMetric{Label: label, Status: "200", Latency: 250})
@@ -91,12 +91,10 @@ func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 	emit(runID, "others")
 	emit(runID, strings.Repeat("x", 1024))
 	emit("stale-run", "stale")
-	as.labelsLock.Lock()
-	delete(as.labelsByRun, runID)
-	as.labelsLock.Unlock()
+	as.finishMetricsRun(runID)
 	emit(runID, "first")
 
-	families, err := as.MetricsRegistry().Gather()
+	families, err := as.gatherMetrics()
 	require.NoError(t, err)
 	counts := make(map[string]float64)
 	for _, family := range families {
@@ -115,6 +113,17 @@ func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 		}
 	}
 	assert.Equal(t, map[string]float64{"first": 2, "others": 2}, counts)
+	firstSnapshot := gatherResourceSnapshot(t, firstRun.Metrics.Registry())
+	next := startTestMetricsRun(t, as, "next")
+	emit(runID, "late-old")
+	emit("next", "fresh")
+	as.finishMetricsRun(runID)
+	emit("next", "fresh")
+	current := nativeScrape(t, as.metricsHandler())
+	assert.Equal(t, map[string]float64{"fresh/200": 2}, nativeCounters(current["shibuya_status_counter"]))
+	assert.Equal(t, "next", nativeLabelValue(current["shibuya_status_counter"].Metric[0], "run_id"))
+	assert.NotSame(t, firstRun.Metrics, next.Metrics)
+	assert.Equal(t, firstSnapshot, gatherResourceSnapshot(t, firstRun.Metrics.Registry()), "stale events cannot alter a completed registry")
 }
 
 func TestMetricLabelLengthBoundary(t *testing.T) {
@@ -144,15 +153,15 @@ func TestMetricsIngestionNumericLabelBudget(t *testing.T) {
 					return ShibuyaMetric{Label: label, Status: "200", Latency: 1, EgressBytes: 10}, nil
 				},
 			})
-			as.startMetricsRun("run")
+			startTestMetricsRun(t, as, "run")
 			as.makePromMetrics(metricEvent{runID: "run", line: strings.Repeat("x", 1024)})
-			empty, err := as.MetricsRegistry().Gather()
+			empty, err := as.gatherMetrics()
 			require.NoError(t, err)
 			assert.Empty(t, empty, "invalid labels must neither publish metrics nor consume admission")
 			for _, label := range []string{"a", "b", "c", "a", "others"} {
 				as.makePromMetrics(metricEvent{runID: "run", line: label})
 			}
-			families, err := as.MetricsRegistry().Gather()
+			families, err := as.gatherMetrics()
 			require.NoError(t, err)
 			counts := make(map[string]float64)
 			for _, family := range families {
@@ -181,11 +190,13 @@ func TestMetricsIngestionIsolatesServersWithIdenticalIdentity(t *testing.T) {
 	}
 	first := NewAgentServer(options)
 	second := NewAgentServer(options)
-	first.startMetricsRun("same-run")
-	second.startMetricsRun("same-run")
+	firstRun := startTestMetricsRun(t, first, "same-run")
+	secondRun := startTestMetricsRun(t, second, "same-run")
+	assert.NotSame(t, firstRun.Metrics.Registry(), secondRun.Metrics.Registry())
+	assert.NotSame(t, firstRun.Metrics.Registry().resources.sampler, secondRun.Metrics.Registry().resources.sampler)
 	event := metricEvent{runID: "same-run", line: "event"}
 	first.makePromMetrics(event)
-	empty, err := second.MetricsRegistry().Gather()
+	empty, err := second.gatherMetrics()
 	require.NoError(t, err)
 	assert.Empty(t, empty, "matching identities must not share collectors")
 	first.makePromMetrics(event)
@@ -197,7 +208,7 @@ func TestMetricsIngestionIsolatesServersWithIdenticalIdentity(t *testing.T) {
 		{first, 2},
 		{second, 1},
 	} {
-		families, err := test.server.MetricsRegistry().Gather()
+		families, err := test.server.gatherMetrics()
 		require.NoError(t, err)
 		require.Len(t, families, 4)
 		for _, family := range families {
@@ -217,8 +228,11 @@ func TestMetricsIngestionIsolatesServersWithIdenticalIdentity(t *testing.T) {
 			}
 		}
 	}
-	first.MetricsRegistry().Reset()
-	retained, err := second.MetricsRegistry().Gather()
+	startTestMetricsRun(t, first, "next-run")
+	empty, err = first.gatherMetrics()
 	require.NoError(t, err)
-	assert.Len(t, retained, 4, "resetting one server must not remove another server's series")
+	assert.Empty(t, empty)
+	retained, err := second.gatherMetrics()
+	require.NoError(t, err)
+	assert.Len(t, retained, 4, "replacing one server's run must not remove another server's series")
 }

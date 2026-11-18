@@ -23,7 +23,7 @@ func (as *AgentServer) customIngesterRunner(ctx context.Context, run *agentRun) 
 		}
 		if err != nil {
 			err = fmt.Errorf("collect engine metrics: %w", err)
-			as.metrics.setCollectionError(err)
+			run.context.Metrics.Registry().setCollectionError(err)
 			as.stateLock.Lock()
 			// An accepted collection error survives a concurrent exit or stop.
 			if run.failure == nil {
@@ -60,7 +60,7 @@ func (as *AgentServer) collectFinalMetrics(run *agentRun) error {
 	}
 	if err != nil {
 		err = fmt.Errorf("collect final engine metrics: %w", err)
-		as.metrics.setCollectionError(err)
+		run.context.Metrics.Registry().setCollectionError(err)
 	}
 	return err
 }

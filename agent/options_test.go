@@ -217,7 +217,6 @@ func TestResolvedOptionsDoNotReloadEnvironment(t *testing.T) {
 	}
 	t.Setenv("api_key", "changed-secret")
 	server := NewAgentServer(options)
-	require.Zero(t, server.labelsUsageLimit)
 	require.Equal(t, "5", server.options.EngineMeta.EngineID)
 	_, err = ca.Verify(x509.VerifyOptions{Roots: server.options.CoordinatorRootCAs})
 	require.NoError(t, err)

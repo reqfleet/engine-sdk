@@ -122,6 +122,10 @@ func (as *AgentServer) queueRequest(message *protocol.EngineMessage, verb string
 		}
 	}
 	if current == nil || current.context.RunID != message.RunID {
+		if as.metricsByRun != nil && as.options.LabelsUsageLimit < 0 {
+			return fmt.Errorf("metrics request-name limit must be nonnegative")
+		}
+		as.clearMetricsRuns()
 		current = &agentRun{
 			context: runContext,
 			status:  protocol.RunStatus{RunID: message.RunID, StartupStatus: protocol.StartupStatePending},
@@ -462,11 +466,7 @@ func (as *AgentServer) finishRunLocked(run *agentRun, err error, phase protocol.
 	run.busy = false
 	run.process = nil
 	run.status.ExitCode = exitCode
-	if as.options.MetricsURL == "" {
-		as.labelsLock.Lock()
-		delete(as.labelsByRun, run.context.RunID)
-		as.labelsLock.Unlock()
-	}
+	as.finishMetricsRun(run.context.RunID)
 	switch {
 	case run.failure != nil:
 		err, phase = run.failure, run.failurePhase

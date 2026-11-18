@@ -4,7 +4,7 @@ package agent
 import (
 	"errors"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -37,15 +37,13 @@ func (sm ShibuyaMetric) LabelIsValid() (bool, error) {
 	return true, nil
 }
 
-// MetricsRegistry owns the canonical reporting collectors for one agent.
-// Construct it with NewMetricsRegistry; the zero value is not usable.
-// Use MetricsRecorder to record adapter samples. The registry exposes gathering
-// and collector reset, not public recording methods. All methods are concurrency-safe.
+// MetricsRegistry owns the canonical reporting collectors for one run.
+// Obtain it from MetricsRecorder.Registry; the zero value is not usable.
+// Collectors are never reset or rebound. All methods are concurrency-safe.
 type MetricsRegistry struct {
-	mu                           sync.RWMutex
 	registry                     *prometheus.Registry
 	resources                    resourceMetrics
-	collectionErr                error
+	collectionErr                atomic.Pointer[metricsCollectionFailure]
 	labelLatencyHistogram        *prometheus.HistogramVec
 	labelLLMRespLatencyHistogram *prometheus.HistogramVec
 	statusCounter                *prometheus.CounterVec
@@ -55,12 +53,11 @@ type MetricsRegistry struct {
 	egressCounter                *prometheus.CounterVec
 }
 
-// NewMetricsRegistry creates independent canonical collectors without starting
-// background work or registering collectors in the default Prometheus registry.
-func NewMetricsRegistry() *MetricsRegistry {
+// newMetricsRegistry creates collectors and a fresh sampler bound to one run.
+func newMetricsRegistry(identity metricIdentity) *MetricsRegistry {
 	r := &MetricsRegistry{
 		registry:  prometheus.NewRegistry(),
-		resources: newResourceMetrics(),
+		resources: newResourceMetrics(identity),
 		labelLatencyHistogram: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    metricschema.RequestLatency,
 			Buckets: metricschema.RequestLatencyBuckets(),
@@ -102,8 +99,8 @@ func NewMetricsRegistry() *MetricsRegistry {
 	return r
 }
 
-// Recording helpers require the caller to hold mu so a sample's updates cannot
-// be split by Reset. Prometheus synchronizes individual collector updates.
+// Prometheus synchronizes individual collector updates. A run's collectors and
+// identity are never replaced or reset, so recording needs no registry lock.
 
 func (r *MetricsRegistry) observeLatency(sm ShibuyaMetric, histogram *prometheus.HistogramVec) {
 	histogram.WithLabelValues(sm.CollectionID, sm.Label, sm.RunID, sm.EngineID, sm.PlanID, sm.Zone).Observe(sm.Latency)
@@ -128,42 +125,19 @@ func (r *MetricsRegistry) latencyHistogramForLabel(label string) *prometheus.His
 	return r.labelLatencyHistogram
 }
 
-// Reset clears every metric series, collection failure, and resource baseline.
-// It does not change recorder identity or admission; use MetricsRecorder.Reset
-// for a recorder run transition, after quiescing previous-run ingestion.
-func (r *MetricsRegistry) Reset() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.reset()
-}
-
-// reset requires the exclusive registry lock so recorder state can transition
-// with collectors without exposing a partially reset snapshot.
-func (r *MetricsRegistry) reset() {
-	r.labelLatencyHistogram.Reset()
-	r.labelLLMRespLatencyHistogram.Reset()
-	r.statusCounter.Reset()
-	r.threadsGauge.Reset()
-	r.cpuGauge.Reset()
-	r.memGauge.Reset()
-	r.egressCounter.Reset()
-	r.resources.reset()
-	r.collectionErr = nil
+type metricsCollectionFailure struct {
+	err error
 }
 
 // Gather implements prometheus.Gatherer without collecting new samples. A
-// CustomIngestMetrics failure is returned until Reset or the next successful launch.
+// CustomIngestMetrics failure remains attached to this run's registry.
 func (r *MetricsRegistry) Gather() ([]*dto.MetricFamily, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.collectionErr != nil {
-		return nil, r.collectionErr
+	if failure := r.collectionErr.Load(); failure != nil {
+		return nil, failure.err
 	}
 	return r.registry.Gather()
 }
 
 func (r *MetricsRegistry) setCollectionError(err error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.collectionErr = err
+	r.collectionErr.Store(&metricsCollectionFailure{err: err})
 }

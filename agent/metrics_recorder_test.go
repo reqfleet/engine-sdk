@@ -55,18 +55,17 @@ func eventPolicyProducer(t *testing.T, source string, budget int) (*MetricsRegis
 				return metric, err
 			},
 		})
-		server.startMetricsRun("run")
-		return server.MetricsRegistry(), func(metric ShibuyaMetric) {
+		run := startTestMetricsRun(t, server, "run")
+		return run.Metrics.Registry(), func(metric ShibuyaMetric) {
 			t.Helper()
 			line, err := json.Marshal(metric)
 			require.NoError(t, err)
 			server.makePromMetrics(metricEvent{runID: "run", line: string(line)})
 		}
 	}
-	registry := NewMetricsRegistry()
-	recorder, err := NewMetricsRecorder(registry, budget)
+	recorder, err := NewMetricsRecorder(RunContext{RunID: "run"}, budget)
 	require.NoError(t, err)
-	recorder.Reset(RunContext{RunID: "run"})
+	registry := recorder.Registry()
 	return registry, func(metric ShibuyaMetric) {
 		t.Helper()
 		err := recorder.RecordEvent(metric)
@@ -123,10 +122,9 @@ func TestMetricsRecorderMeasurementPresence(t *testing.T) {
 			[]string{metricschema.RequestLatency, metricschema.EgressBytesCounter, metricschema.ThreadsGauge}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			registry := NewMetricsRegistry()
-			recorder, err := NewMetricsRecorder(registry, 0)
+			recorder, err := NewMetricsRecorder(RunContext{}, 0)
 			require.NoError(t, err)
-			recorder.Reset(RunContext{})
+			registry := recorder.Registry()
 			sample := test.sample
 			sample.Metric = ShibuyaMetric{Label: "llm_resp", Status: "204", Latency: 0, EgressBytes: 12, Threads: 3}
 			require.NoError(t, recorder.RecordSample(sample))
@@ -173,10 +171,9 @@ func TestMetricsRecorderNamedMeasurements(t *testing.T) {
 		for _, budget := range []int{0, 1} {
 			for _, populated := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/budget-%d/populated-%t", test.name, budget, populated), func(t *testing.T) {
-					registry := NewMetricsRegistry()
-					recorder, err := NewMetricsRecorder(registry, budget)
+					recorder, err := NewMetricsRecorder(RunContext{}, budget)
 					require.NoError(t, err)
-					recorder.Reset(RunContext{})
+					registry := recorder.Registry()
 					metric := ShibuyaMetric{Label: "llm_resp", Status: "204", Latency: 8, EgressBytes: 12, Threads: 3}
 					invalid := metric
 					invalid.Label = strings.Repeat("x", 1024)
@@ -225,10 +222,9 @@ func TestMetricsRecorderNamedMeasurements(t *testing.T) {
 }
 
 func TestMetricsRecorderSharedAdmissionAndIndependentSamples(t *testing.T) {
-	registry := NewMetricsRegistry()
-	recorder, err := NewMetricsRecorder(registry, 1)
+	recorder, err := NewMetricsRecorder(RunContext{}, 1)
 	require.NoError(t, err)
-	recorder.Reset(RunContext{})
+	registry := recorder.Registry()
 	invalid := ShibuyaMetric{Label: strings.Repeat("x", 1024), Latency: 999, EgressBytes: 999, Threads: 999}
 	require.Error(t, recorder.RecordSample(completeRequestSample(invalid)))
 	require.Error(t, recorder.AddAggregateReceivedBytes(invalid))
@@ -272,10 +268,9 @@ func TestMetricsRecorderSharedAdmissionAndIndependentSamples(t *testing.T) {
 
 func TestMetricsRecorderInstances(t *testing.T) {
 	for _, firstName := range []string{"first-run", "second-run"} {
-		registry := NewMetricsRegistry()
-		recorder, err := NewMetricsRecorder(registry, 1)
+		recorder, err := NewMetricsRecorder(RunContext{RunID: firstName}, 1)
 		require.NoError(t, err)
-		recorder.Reset(RunContext{RunID: firstName})
+		registry := recorder.Registry()
 		for _, name := range []string{firstName, "excess", firstName} {
 			require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
 				Label: name, RunID: firstName, Status: "200", Latency: 2, EgressBytes: 10, Threads: 7,
@@ -286,27 +281,75 @@ func TestMetricsRecorderInstances(t *testing.T) {
 }
 
 func TestMetricsRecorderConcurrentAdmission(t *testing.T) {
-	registry := NewMetricsRegistry()
-	recorder, err := NewMetricsRecorder(registry, 1)
-	require.NoError(t, err)
-	recorder.Reset(RunContext{})
-	require.NoError(t, recorder.RecordEvent(ShibuyaMetric{Label: "kept", Status: "200", Latency: 2, EgressBytes: 10, Threads: 7}))
-	var workers sync.WaitGroup
-	for _, label := range []string{"kept", "a", "b", "others"} {
-		workers.Go(func() {
-			for range 50 {
-				metric := ShibuyaMetric{Label: label, Status: "200", Latency: 2, EgressBytes: 10, Threads: 7}
-				assert.NoError(t, recorder.ObserveRequest(metric))
-				assert.NoError(t, recorder.AddReceivedBytes(metric))
-				recorder.SetConcurrency(metric)
-				assert.NoError(t, recorder.RecordEvent(metric))
-				_, err := registry.Gather()
-				assert.NoError(t, err)
+	const repetitions = 50
+	for _, budget := range []int{0, 1, 3, 8} {
+		t.Run(fmt.Sprintf("budget-%d", budget), func(t *testing.T) {
+			runs := []RunContext{resetTestRun("first"), resetTestRun("second")}
+			recorders := make([]*MetricsRecorder, len(runs))
+			for i, run := range runs {
+				recorder, err := NewMetricsRecorder(run, budget)
+				require.NoError(t, err)
+				recorders[i] = recorder
+			}
+			start := make(chan struct{})
+			var workers sync.WaitGroup
+			for i, recorder := range recorders {
+				for n := range 8 {
+					label := fmt.Sprintf("%s-request-%d", runs[i].RunID, n)
+					// Duplicate writers contend to insert the same name while other
+					// names compete for the remaining budget.
+					for range 2 {
+						workers.Go(func() {
+							<-start
+							for range repetitions {
+								metric := ShibuyaMetric{Label: label, Status: "200", Latency: 2, EgressBytes: 10, Threads: 7}
+								assert.NoError(t, recorder.ObserveRequest(metric))
+								assert.NoError(t, recorder.AddReceivedBytes(metric))
+								recorder.SetConcurrency(metric)
+								assert.NoError(t, recorder.RecordEvent(metric))
+								_, err := recorder.Registry().Gather()
+								assert.NoError(t, err)
+							}
+						})
+					}
+				}
+			}
+			close(start)
+			workers.Wait()
+			for i, recorder := range recorders {
+				families := gatherCanonicalMetrics(t, recorder.Registry())
+				assertResetSnapshotIdentity(t, families, runs[i])
+				require.Contains(t, families, metricschema.StatusCounter)
+				want := make(map[string]float64)
+				for _, metric := range families[metricschema.StatusCounter].Metric {
+					label := nativeLabelValue(metric, "label")
+					if label != metricschema.OverflowRequestName {
+						assert.True(t, strings.HasPrefix(label, runs[i].RunID+"-request-"))
+						want[label] = 4 * repetitions
+					}
+				}
+				require.Len(t, want, budget, "concurrent insertion must use exactly the available slots")
+				if budget < 8 {
+					want[metricschema.OverflowRequestName] = float64((8 - budget) * 4 * repetitions)
+				}
+				assertCompleteSampleTotals(t, recorder.Registry(), want, 2, 10, 7)
+				// Revisit every source after contention; admitted names must stay
+				// admitted and overflow names must not steal an existing slot.
+				for n := range 8 {
+					label := fmt.Sprintf("%s-request-%d", runs[i].RunID, n)
+					require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
+						Label: label, Status: "200", Latency: 2, EgressBytes: 10, Threads: 7,
+					}))
+					if _, admitted := want[label]; admitted {
+						want[label]++
+					} else {
+						want[metricschema.OverflowRequestName]++
+					}
+				}
+				assertCompleteSampleTotals(t, recorder.Registry(), want, 2, 10, 7)
 			}
 		})
 	}
-	workers.Wait()
-	assertCompleteSampleTotals(t, registry, map[string]float64{"kept": 101, "others": 300}, 2, 10, 7)
 }
 
 func TestRequestSamplePolicyHistogramRouting(t *testing.T) {
@@ -329,10 +372,9 @@ func TestRequestSamplePolicyHistogramRouting(t *testing.T) {
 			})
 		}
 	}
-	registry := NewMetricsRegistry()
-	recorder, err := NewMetricsRecorder(registry, 1)
+	recorder, err := NewMetricsRecorder(RunContext{}, 1)
 	require.NoError(t, err)
-	recorder.Reset(RunContext{})
+	registry := recorder.Registry()
 	require.NoError(t, recorder.RecordSample(RequestSample{
 		Metric: ShibuyaMetric{Label: "llm_resp", Latency: 4500}, HasLatency: true,
 	}))
@@ -343,10 +385,7 @@ func TestRequestSamplePolicyHistogramRouting(t *testing.T) {
 }
 
 func TestNewMetricsRecorderRejectsInvalidConfiguration(t *testing.T) {
-	recorder, err := NewMetricsRecorder(nil, 1)
-	require.Error(t, err)
-	assert.Nil(t, recorder)
-	recorder, err = NewMetricsRecorder(NewMetricsRegistry(), -1)
+	recorder, err := NewMetricsRecorder(RunContext{}, -1)
 	require.Error(t, err)
 	assert.Nil(t, recorder)
 }
@@ -443,10 +482,14 @@ func TestMetricsRecorderBoundIdentity(t *testing.T) {
 			},
 		} {
 			t.Run(run.name+"/"+entry.name, func(t *testing.T) {
-				registry := NewMetricsRegistry()
-				recorder, err := NewMetricsRecorder(registry, 1)
+				assigned := run.run
+				recorder, err := NewMetricsRecorder(assigned, 1)
 				require.NoError(t, err)
-				recorder.Reset(run.run)
+				assigned.CollectionID = "changed-collection"
+				assigned.PlanID = "changed-plan"
+				assigned.RunID = "changed-run"
+				assigned.AgentID = "changed-engine"
+				assigned.Zone = "changed-zone"
 				for _, source := range []ShibuyaMetric{
 					{},
 					{
@@ -459,8 +502,7 @@ func TestMetricsRecorderBoundIdentity(t *testing.T) {
 					require.NoError(t, entry.record(recorder, source))
 				}
 
-				server := NewAgentServer(AgentServerOptions{MetricsRegistry: registry, LabelsUsageLimit: 1})
-				families := nativeScrape(t, server.metricsHandler())
+				families := gatherResourceSnapshot(t, recorder.Registry())
 				require.Len(t, families, len(entry.want), "source identity must not create additional families")
 				for _, name := range entry.want {
 					require.Contains(t, families, name)
@@ -543,10 +585,9 @@ func TestMetricsRecorderLLMResponseValidation(t *testing.T) {
 	for _, value := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
 		for _, populated := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%v/populated-%t", value, populated), func(t *testing.T) {
-				registry := NewMetricsRegistry()
-				recorder, err := NewMetricsRecorder(registry, 2)
+				recorder, err := NewMetricsRecorder(resetTestRun("validation"), 2)
 				require.NoError(t, err)
-				recorder.Reset(resetTestRun("validation"))
+				registry := recorder.Registry()
 				if populated {
 					require.NoError(t, recorder.RecordSample(completeRequestSample(ShibuyaMetric{
 						Label: "existing", Status: "200", Latency: 8, EgressBytes: 12, Threads: 3,
@@ -581,11 +622,10 @@ func TestMetricsRecorderLLMResponseWideHistogram(t *testing.T) {
 		{"exhausted", 1, true, metricschema.OverflowRequestName},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			registry := NewMetricsRegistry()
-			recorder, err := NewMetricsRecorder(registry, test.budget)
-			require.NoError(t, err)
 			run := resetTestRun(test.name)
-			recorder.Reset(run)
+			recorder, err := NewMetricsRecorder(run, test.budget)
+			require.NoError(t, err)
+			registry := recorder.Registry()
 			if test.exhausted {
 				require.NoError(t, recorder.RecordSample(completeRequestSample(ShibuyaMetric{
 					Label: "http", Status: "200", Latency: 8, EgressBytes: 12, Threads: 3,
@@ -640,10 +680,9 @@ func TestMetricsRecorderLLMResponseSharesHTTPAndTTFTAdmission(t *testing.T) {
 	} {
 		for _, budget := range []int{0, 1, 2, 3} {
 			t.Run(fmt.Sprintf("%s/budget-%d", strings.Join(order, "-"), budget), func(t *testing.T) {
-				registry := NewMetricsRegistry()
-				recorder, err := NewMetricsRecorder(registry, budget)
+				recorder, err := NewMetricsRecorder(resetTestRun("shared"), budget)
 				require.NoError(t, err)
-				recorder.Reset(resetTestRun("shared"))
+				registry := recorder.Registry()
 				wantLabels := make(map[string]string)
 				for i, label := range order {
 					wantLabels[label] = label
@@ -692,12 +731,11 @@ func TestMetricsRecorderLLMResponseSharesHTTPAndTTFTAdmission(t *testing.T) {
 	}
 }
 
-func TestMetricsRecorderLLMResponseResetAndOrdinaryName(t *testing.T) {
-	registry := NewMetricsRegistry()
-	recorder, err := NewMetricsRecorder(registry, 1)
-	require.NoError(t, err)
+func TestMetricsRecorderLLMResponseIndependentRunsAndOrdinaryName(t *testing.T) {
 	first := resetTestRun("first")
-	recorder.Reset(first)
+	recorder, err := NewMetricsRecorder(first, 1)
+	require.NoError(t, err)
+	registry := recorder.Registry()
 	require.NoError(t, recorder.ObserveLLMResponse(100))
 	require.NoError(t, recorder.ObserveRequest(ShibuyaMetric{
 		Label: metricschema.LLMResponseLabel, Status: "200", Latency: 7,
@@ -716,11 +754,13 @@ func TestMetricsRecorderLLMResponseResetAndOrdinaryName(t *testing.T) {
 	assert.Equal(t, snapshot, gatherCanonicalMetrics(t, registry))
 
 	next := resetTestRun("next")
-	recorder.Reset(next)
-	require.Empty(t, gatherCanonicalMetrics(t, registry))
-	require.NoError(t, recorder.ObserveLatency(ShibuyaMetric{Label: metricschema.TTFTLabel, Latency: 2}))
-	require.NoError(t, recorder.ObserveLLMResponse(3))
-	fresh := gatherCanonicalMetrics(t, registry)
+	nextRecorder, err := NewMetricsRecorder(next, 1)
+	require.NoError(t, err)
+	require.Empty(t, gatherCanonicalMetrics(t, nextRecorder.Registry()))
+	require.NoError(t, nextRecorder.ObserveLatency(ShibuyaMetric{Label: metricschema.TTFTLabel, Latency: 2}))
+	require.NoError(t, nextRecorder.ObserveLLMResponse(3))
+	fresh := gatherCanonicalMetrics(t, nextRecorder.Registry())
+	assert.Equal(t, snapshot, gatherCanonicalMetrics(t, registry))
 	require.Len(t, fresh, 2)
 	assertResetSnapshotIdentity(t, fresh, next)
 	assert.Equal(t, metricschema.TTFTLabel, nativeLabelValue(fresh[metricschema.RequestLatency].Metric[0], "label"))
@@ -729,10 +769,13 @@ func TestMetricsRecorderLLMResponseResetAndOrdinaryName(t *testing.T) {
 	assert.Equal(t, uint64(1), wide.GetHistogram().GetSampleCount())
 	assert.Equal(t, 3.0, wide.GetHistogram().GetSampleSum())
 
-	recorder.Reset(RunContext{})
-	require.Empty(t, gatherCanonicalMetrics(t, registry))
-	require.NoError(t, recorder.ObserveLLMResponse(0))
-	emptyIdentity := gatherCanonicalMetrics(t, registry)
+	blankRecorder, err := NewMetricsRecorder(RunContext{}, 1)
+	require.NoError(t, err)
+	require.Empty(t, gatherCanonicalMetrics(t, blankRecorder.Registry()))
+	require.NoError(t, blankRecorder.ObserveLLMResponse(0))
+	emptyIdentity := gatherCanonicalMetrics(t, blankRecorder.Registry())
+	require.NoError(t, recorder.ObserveLLMResponse(9))
+	assert.Equal(t, fresh, gatherCanonicalMetrics(t, nextRecorder.Registry()))
 	require.Len(t, emptyIdentity, 1)
 	assertRecorderMetricLabels(t, emptyIdentity[metricschema.LLMResponseLatency].Metric[0],
 		RunContext{}, map[string]string{"label": metricschema.LLMResponseLabel})

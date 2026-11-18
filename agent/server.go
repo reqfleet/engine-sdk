@@ -83,14 +83,12 @@ type AgentServer struct {
 	runtime   agentRuntimeProgress
 	stateLock sync.RWMutex
 
-	// Concurrent access fields
-	bus      chan metricEvent
 	requests chan agentRequest
-	metrics  *MetricsRegistry
-	// Label tracking
-	labelsLock       sync.RWMutex
-	labelsByRun      map[string]map[string]struct{}
-	labelsUsageLimit int
+
+	// At most one SDK-managed run is published, retained through completion until
+	// a new run ID is accepted. Collector updates never hold this lock.
+	metricsMu    sync.RWMutex
+	metricsByRun map[string]runMetricsEntry
 
 	// Native admission survives run completion for the final upstream scrape.
 	nativeMetricsLock sync.Mutex
@@ -129,15 +127,13 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 		},
 	}
 	as := &AgentServer{
-		runtime:          agentRuntimeProgress{retired: make(map[string]protocol.RunState)},
-		bus:              make(chan metricEvent),
-		requests:         make(chan agentRequest, 1),
-		options:          opts,
-		cdrclient:        coordinator.NewClient(httpClient),
-		reqOpts:          opts.EngineMeta.makeReqOpts(),
-		logger:           opts.Logger,
-		angentDir:        NewAgentDirHandler(""),
-		labelsUsageLimit: opts.LabelsUsageLimit,
+		runtime:   agentRuntimeProgress{retired: make(map[string]protocol.RunState)},
+		requests:  make(chan agentRequest, 1),
+		options:   opts,
+		cdrclient: coordinator.NewClient(httpClient),
+		reqOpts:   opts.EngineMeta.makeReqOpts(),
+		logger:    opts.Logger,
+		angentDir: NewAgentDirHandler(""),
 		pubsubClient: pubsub.PubSubClient{
 			Addr:     net.JoinHostPort(opts.EngineMeta.CoordinatorIP, "2416"),
 			Password: opts.EngineMeta.APIKey,
@@ -148,38 +144,21 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 		},
 	}
 	if opts.MetricsURL == "" && opts.MetricsHandler == nil {
-		as.labelsByRun = make(map[string]map[string]struct{})
-		as.metrics = opts.MetricsRegistry
-		if as.metrics == nil {
-			as.metrics = NewMetricsRegistry()
-		}
+		as.metricsByRun = make(map[string]runMetricsEntry, 1)
 	}
 	return as
 }
 
-func (as *AgentServer) handleMetricStream() {
-	for event := range as.bus {
-		as.makePromMetrics(event)
-	}
-}
-
 func (as *AgentServer) makePromMetrics(event metricEvent) {
-	as.labelsLock.Lock()
-	labels, ok := as.labelsByRun[event.runID]
-	if !ok {
-		as.labelsLock.Unlock()
+	recorder := as.recordingMetrics(event.runID)
+	if recorder == nil {
 		return
 	}
-	defer as.labelsLock.Unlock()
-
-	metricParser := as.options.MetricParser
-	metric, err := metricParser(event.line)
+	metric, err := as.options.MetricParser(event.line)
 	if err != nil {
 		return
 	}
-
-	identity := identityFromMeta(as.options.EngineMeta, event.runID)
-	if err := recordRequestSample(as.metrics, labels, as.labelsUsageLimit, &identity, completeRequestSample(metric), true); err != nil {
+	if err := recorder.RecordEvent(metric); err != nil {
 		log.Error(err)
 	}
 }
@@ -213,11 +192,7 @@ func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
 			if line == nil || line.Err != nil {
 				continue
 			}
-			select {
-			case <-ctx.Done():
-				return
-			case as.bus <- metricEvent{runID: runID, line: line.Text}:
-			}
+			as.makePromMetrics(metricEvent{runID: runID, line: line.Text})
 		}
 	}
 }
@@ -338,12 +313,8 @@ type AgentServerOptions struct {
 	Stop                func(context.Context, RunContext, Process) error
 	// StopTimeout overrides DefaultStopTimeout when positive.
 	StopTimeout time.Duration
-	// MetricsRegistry supplies the SDK's canonical collectors. If nil, the SDK
-	// creates a per-server registry. It cannot be combined with native sources.
-	// Do not share one registry between servers.
-	MetricsRegistry *MetricsRegistry
 	// CustomIngestMetrics is for adapters that normalize engine output themselves
-	// and record samples through a MetricsRecorder into the SDK-owned registry.
+	// and record samples through RunContext.Metrics into that run's registry.
 	//
 	// Use it when MetricParser's complete-request event model does not fit.
 	// For example, k6 CSV emits separate request-duration, received-byte and
@@ -356,7 +327,7 @@ type AgentServerOptions struct {
 	// The SDK calls it after launch, every 250ms, and once after workload exit
 	// to drain final output before workspace release. Calls never overlap.
 	// Honor the supplied context; the final call uses FinalMetricsTimeout.
-	// Errors fail the run and registry scrapes until Reset or the next launch.
+	// Errors fail the run and its registry scrapes; a new run has independent state.
 	//
 	// Cannot be combined with MetricParser or native metrics sources.
 	// ResultFile may name engine output; the SDK does not tail it.
@@ -492,8 +463,8 @@ func (as *AgentServer) validateMetricsOptions() error {
 		return fmt.Errorf("metrics label limit must be nonnegative")
 	}
 	if options.MetricsURL != "" || options.MetricsHandler != nil {
-		if options.MetricsRegistry != nil || options.CustomIngestMetrics != nil {
-			return fmt.Errorf("native metrics cannot configure MetricsRegistry or CustomIngestMetrics")
+		if options.CustomIngestMetrics != nil {
+			return fmt.Errorf("native metrics cannot configure CustomIngestMetrics")
 		}
 	}
 	if options.CustomIngestMetrics != nil && options.MetricParser != nil {
