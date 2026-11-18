@@ -518,7 +518,7 @@ timing metric, protocol negotiation or automatic conformance enforcement.
 ## Request-label validation
 
 Request labels must contain at most `metricschema.MaxRequestLabelBytes`
-(1023 bytes, not characters). Use `agent.ShibuyaMetric.LabelIsValid()` to check
+(255 bytes, not characters). Use `agent.ShibuyaMetric.LabelIsValid()` to check
 the byte length; adapter-specific requirements, such as a nonempty URL, remain
 separate.
 
@@ -546,6 +546,12 @@ Rejection scope depends on the integration:
 
 These are metrics-reporting rules, not limits on workload HTTP URLs or permission
 to execute requests. Rejecting a metric event does not cancel or fail the workload.
+
+When upgrading from the previous 1023-byte maximum, choose bounded request/group
+names in the adapter's source mapping for longer URLs. SDK-managed ingestion now
+rejects labels of 256–1023 bytes that earlier versions accepted. Existing engine
+images retain their deployed behavior; coordinators must remain compatible with
+those engines rather than requiring an upgrade.
 
 ## Request-name budget
 

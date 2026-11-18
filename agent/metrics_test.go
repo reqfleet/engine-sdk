@@ -63,7 +63,7 @@ func TestMetricsIngestion(t *testing.T) {
 	assert.Equal(t, float64(10), before["shibuya_threads_gauge"].GetGauge().GetValue())
 	as.makePromMetrics(metricEvent{runID: runID, line: "malformed|row"})
 	assert.Equal(t, before, gather(), "malformed events must not change any totals")
-	as.makePromMetrics(metricEvent{runID: runID, line: `{"Label":"` + strings.Repeat("x", 1024) + `","Status":"503","Latency":999,"EgressBytes":999,"Threads":999}`})
+	as.makePromMetrics(metricEvent{runID: runID, line: `{"Label":"` + strings.Repeat("x", 256) + `","Status":"503","Latency":999,"EgressBytes":999,"Threads":999}`})
 	assert.Equal(t, before, gather(), "an invalid label must reject the entire event")
 }
 
@@ -89,7 +89,7 @@ func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 	emit(runID, "second")
 	emit(runID, "first")
 	emit(runID, "others")
-	emit(runID, strings.Repeat("x", 1024))
+	emit(runID, strings.Repeat("x", 256))
 	emit("stale-run", "stale")
 	as.finishMetricsRun(runID)
 	emit(runID, "first")
@@ -127,12 +127,12 @@ func TestMetricsIngestionLabelLimitsAndStaleRuns(t *testing.T) {
 }
 
 func TestMetricLabelLengthBoundary(t *testing.T) {
-	for _, size := range []int{0, 1023, 1024, 1025} {
+	for _, size := range []int{0, 254, 255, 256, 257, 1023, 1024} {
 		metric := ShibuyaMetric{Label: strings.Repeat("x", size)}
 		assert.Equal(t, size, metric.LabelLength())
 		valid, err := metric.LabelIsValid()
-		assert.Equal(t, size < 1024, valid)
-		assert.Equal(t, size >= 1024, err != nil)
+		assert.Equal(t, size <= 255, valid)
+		assert.Equal(t, size > 255, err != nil)
 	}
 }
 
@@ -154,7 +154,7 @@ func TestMetricsIngestionNumericLabelBudget(t *testing.T) {
 				},
 			})
 			startTestMetricsRun(t, as, "run")
-			as.makePromMetrics(metricEvent{runID: "run", line: strings.Repeat("x", 1024)})
+			as.makePromMetrics(metricEvent{runID: "run", line: strings.Repeat("x", 256)})
 			empty, err := as.gatherMetrics()
 			require.NoError(t, err)
 			assert.Empty(t, empty, "invalid labels must neither publish metrics nor consume admission")

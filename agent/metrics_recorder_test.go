@@ -17,7 +17,7 @@ import (
 // Exercise the public recorder and result-file entry point against the same
 // independent expectations, not merely against each other's output.
 func TestRequestSamplePolicy(t *testing.T) {
-	boundaryName := strings.Repeat("界", 341) // 1023 bytes, not 1023 characters.
+	boundaryName := strings.Repeat("界", 85) // 255 bytes, not 255 characters.
 	for _, source := range []string{"recorder", "result-file"} {
 		for _, budget := range []int{0, 2} {
 			t.Run(fmt.Sprintf("%s/budget-%d", source, budget), func(t *testing.T) {
@@ -150,7 +150,7 @@ func TestMetricsRecorderMeasurementPresence(t *testing.T) {
 					assert.Equal(t, float64(3), metric.GetGauge().GetValue())
 				}
 			}
-			sample.Metric.Label = strings.Repeat("x", 1024)
+			sample.Metric.Label = strings.Repeat("x", 256)
 			require.Error(t, recorder.RecordSample(sample))
 			assert.Equal(t, families, gatherCanonicalMetrics(t, registry))
 		})
@@ -176,7 +176,7 @@ func TestMetricsRecorderNamedMeasurements(t *testing.T) {
 					registry := recorder.Registry()
 					metric := ShibuyaMetric{Label: "llm_resp", Status: "204", Latency: 8, EgressBytes: 12, Threads: 3}
 					invalid := metric
-					invalid.Label = strings.Repeat("x", 1024)
+					invalid.Label = strings.Repeat("x", 256)
 					require.Error(t, test.record(recorder, invalid))
 					require.Empty(t, gatherCanonicalMetrics(t, registry))
 
@@ -225,7 +225,7 @@ func TestMetricsRecorderSharedAdmissionAndIndependentSamples(t *testing.T) {
 	recorder, err := NewMetricsRecorder(RunContext{}, 1)
 	require.NoError(t, err)
 	registry := recorder.Registry()
-	invalid := ShibuyaMetric{Label: strings.Repeat("x", 1024), Latency: 999, EgressBytes: 999, Threads: 999}
+	invalid := ShibuyaMetric{Label: strings.Repeat("x", 256), Latency: 999, EgressBytes: 999, Threads: 999}
 	require.Error(t, recorder.RecordSample(completeRequestSample(invalid)))
 	require.Error(t, recorder.AddAggregateReceivedBytes(invalid))
 

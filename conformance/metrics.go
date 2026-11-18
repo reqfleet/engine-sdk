@@ -484,8 +484,8 @@ func validateMetricLabels(metric *dto.Metric, names []string, identity map[strin
 			return nil, fmt.Errorf("missing schema label %q", name)
 		}
 	}
-	if length := len(labels[metricschema.LabelRequest]); length >= 1024 {
-		return nil, fmt.Errorf("request label length %d bytes, want less than 1024", length)
+	if length := len(labels[metricschema.LabelRequest]); length > metricschema.MaxRequestLabelBytes {
+		return nil, fmt.Errorf("request label length %d bytes, want at most %d", length, metricschema.MaxRequestLabelBytes)
 	}
 	for name, want := range identity {
 		if labels[name] != want {

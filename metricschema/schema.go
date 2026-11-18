@@ -5,8 +5,8 @@ package metricschema
 
 const (
 	// MaxRequestLabelBytes is the inclusive maximum request-label length in bytes,
-	// not characters. Labels of 1024 bytes or more are invalid.
-	MaxRequestLabelBytes = 1023
+	// not characters. Labels of 256 bytes or more are invalid.
+	MaxRequestLabelBytes = 255
 	// DefaultLabelLimit is the default number of distinct request names
 	// per agent/run when label_limit is unset or empty. Overflow is additional.
 	// An explicitly configured zero budget is not replaced by this default.
