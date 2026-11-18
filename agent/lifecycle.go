@@ -289,9 +289,6 @@ func (as *AgentServer) initializeWorkspace(run *agentRun) error {
 }
 
 func (as *AgentServer) prepareDependencies(run *agentRun) error {
-	if err := run.ctx.Err(); err != nil {
-		return newDependencyStartupFailure(err)
-	}
 	if run.message.DependencyFile != "" && (as.options.DependencyFileName == "" || as.options.PrepareDependencies == nil) {
 		return newDependencyStartupFailure(fmt.Errorf("dependency preparation is not configured"))
 	}
@@ -310,23 +307,17 @@ func (as *AgentServer) prepareDependencies(run *agentRun) error {
 			}
 		}
 	}
-	if err := run.ctx.Err(); err != nil {
-		return newDependencyStartupFailure(err)
-	}
 	if as.options.PrepareDependencies != nil {
 		if err := as.options.PrepareDependencies(run.ctx, run.context); err != nil {
 			return newDependencyStartupFailure(err)
 		}
 	}
-	return run.ctx.Err()
+	return nil
 }
 
 func (as *AgentServer) fetchRunFile(run *agentRun, remote, local string) error {
 	content, err := as.cdrclient.FetchFile(run.ctx, as.reqOpts, remote)
 	if err != nil {
-		return err
-	}
-	if err := run.ctx.Err(); err != nil {
 		return err
 	}
 	return os.WriteFile(local, content, FILEMODE)
@@ -366,9 +357,6 @@ func (as *AgentServer) handleStart(run *agentRun) error {
 			return err
 		}
 	}
-	if err := run.ctx.Err(); err != nil {
-		return err
-	}
 	if as.options.BeforeStart != nil {
 		if err := as.options.BeforeStart(run.ctx, run.context); err != nil {
 			return err
@@ -384,10 +372,8 @@ func (as *AgentServer) observeRun(ctx context.Context, run *agentRun) {
 		probeCtx, cancel := context.WithTimeout(ctx, ObservationTimeout)
 		observation, err := as.options.Observe(probeCtx, run.context)
 		cancel()
-		if ctx.Err() != nil {
-			return
-		}
 		as.stateLock.Lock()
+		// Monitor cancellation follows run cancellation or process exit.
 		if run.ctx.Err() != nil || run.exited {
 			as.stateLock.Unlock()
 			return
@@ -429,9 +415,7 @@ func (as *AgentServer) observeRun(ctx context.Context, run *agentRun) {
 func (as *AgentServer) collectProgress(ctx context.Context, run *agentRun) {
 	progress, err := as.options.Progress(ctx, run.context)
 	if err != nil {
-		if ctx.Err() == nil {
-			as.logger.WithError(err).Warn("Engine progress is unavailable")
-		}
+		as.logger.WithError(err).Warn("Engine progress is unavailable")
 		return
 	}
 	if progress.Kind == "" || !json.Valid(progress.Data) {

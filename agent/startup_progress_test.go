@@ -43,6 +43,40 @@ func TestShortRunCompletesWithoutReadinessOrResultFile(t *testing.T) {
 	assert.False(t, status.Running)
 }
 
+func TestCanceledObservationCannotChangeRunOutcome(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		observation protocol.Observation
+		err         error
+	}{
+		{name: "ready", observation: protocol.ObservationReady},
+		{name: "complete", observation: protocol.ObservationWorkComplete},
+		{name: "error", err: errors.New("probe failed during shutdown")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			entered := make(chan struct{})
+			f := newAgentFixture(t, AgentServerOptions{
+				Observe: func(ctx context.Context, _ RunContext) (protocol.Observation, error) {
+					close(entered)
+					<-ctx.Done()
+					return test.observation, test.err
+				},
+			}, nil)
+			f.send(runMessage(protocol.VerbStart, "run-1", ""))
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("observation did not start")
+			}
+			f.server.stopRun("run-1", protocol.StopCanceled)
+			status := waitRunState(t, f, "run-1", protocol.RunCanceled)
+			assert.Equal(t, protocol.StartupStateCanceled, status.StartupStatus)
+			assert.Empty(t, status.FailurePhase)
+			assert.Empty(t, status.ErrorMessage)
+		})
+	}
+}
+
 func TestFailureAfterReadinessPreservesStartupAndReportsOutcome(t *testing.T) {
 	release := filepath.Join(t.TempDir(), "fail")
 	f := newAgentFixture(t, AgentServerOptions{BuildCommand: func(context.Context, RunContext) (Command, error) {
