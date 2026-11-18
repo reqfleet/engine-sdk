@@ -193,7 +193,7 @@ func TestMissingDeclarationReconcilesBeforeLaunch(t *testing.T) {
 	assert.Zero(t, starts.Load())
 }
 
-func TestCanceledDependencyPreparationCannotAdvanceStartup(t *testing.T) {
+func TestCanceledDependencyPreparationCannotLaunchWorkload(t *testing.T) {
 	for _, verb := range []string{protocol.VerbPrepare, protocol.VerbStart} {
 		t.Run(verb, func(t *testing.T) {
 			entered := make(chan struct{})
@@ -228,10 +228,8 @@ func TestCanceledDependencyPreparationCannotAdvanceStartup(t *testing.T) {
 			if verb == protocol.VerbPrepare {
 				assert.Equal(t, protocol.PreparationStateCanceled, f.server.getPreparationProgress().Status)
 			}
-			for _, path := range []string{prepared, launched} {
-				_, err := os.Stat(path)
-				assert.ErrorIs(t, err, os.ErrNotExist)
-			}
+			_, err := os.Stat(launched)
+			assert.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
 }

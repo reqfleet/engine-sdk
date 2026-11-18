@@ -14,10 +14,8 @@ func (as *AgentServer) customIngesterRunner(ctx context.Context, run *agentRun) 
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if ctx.Err() != nil {
-			return
-		}
 		err := as.options.CustomIngestMetrics(ctx, run.context)
+		// Shutdown cancellation is not a collection failure.
 		if ctx.Err() != nil {
 			return
 		}

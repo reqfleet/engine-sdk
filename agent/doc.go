@@ -55,10 +55,12 @@
 // restart canceled long-running work.
 //
 // Stop targets a run and carries the coordinator's reason: scheduled completion
-// or cancellation. Preparation cancellation prevents launch, even if the hook
-// returns nil: the SDK checks cancellation before completing preparation or
-// advancing startup. Observations returned after cancellation or process exit
-// are ignored. The runtime retains ownership while callbacks roll back or
+// or cancellation. Preparation cancellation prevents launch, even if a hook
+// returns nil: cancellation is checked before completing preparation and before
+// process launch. File operations may finish after cancellation, and callbacks
+// may receive an already-canceled context; they must still honor it.
+// Observations returned after cancellation or process exit are ignored.
+// The runtime retains ownership while callbacks roll back or
 // terminate child processes. For a running workload, Stop receives a fresh
 // context bounded by StopTimeout (DefaultStopTimeout,
 // ten seconds, by default). Without Stop the runtime sends SIGTERM to the process
