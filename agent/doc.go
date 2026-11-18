@@ -142,9 +142,9 @@
 // admission, and per-run state. RequestsNamesStore provides synchronized first-N
 // admission with a fixed nonnegative budget and overflow-only behavior at zero.
 // Admit requires a validated source name; the recorder validates before admission.
-// Membership/full-budget checks use a read lock; insertion takes an exclusive
-// lock and rechecks. Recording and gathering are concurrency-safe, but a scrape
-// is not a transaction across independent measurements.
+// Admit holds one exclusive store lock for the complete membership, capacity,
+// and insertion decision. Recording and gathering are concurrency-safe, but a
+// scrape is not a transaction across independent measurements.
 // The SDK has no tier policy. Workloads inherit label_limit if present; Command.Env may override
 // it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce
 // their own configured limits.
