@@ -40,7 +40,6 @@ func (as *AgentServer) Run() error {
 			as.listenToCoordinator(msgChan)
 		}
 	}()
-	go as.handleMetricStream()
 	return as.startHTTPServer()
 }
 
@@ -86,7 +85,7 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 		run.status.StartupStatus = protocol.StartupStateStarted
 		run.status.State = protocol.RunRunning
 	}
-	as.startMetricsRun(run.context.RunID)
+	as.prepareMetricsForRun(&run.context)
 	as.stateLock.Unlock()
 
 	var readers sync.WaitGroup
@@ -94,8 +93,8 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	readers.Go(func() { as.streamToLogger(stderr, "stderr") })
 	monitorCtx, stopMonitor := context.WithCancel(run.ctx)
 	var monitors sync.WaitGroup
-	if as.metrics != nil {
-		monitors.Go(func() { as.reportOwnMetrics(monitorCtx, 5*time.Second) })
+	if run.context.Metrics != nil {
+		monitors.Go(func() { as.reportOwnMetrics(monitorCtx, run.context.Metrics, 5*time.Second) })
 	}
 	if as.options.CustomIngestMetrics != nil {
 		monitors.Go(func() { as.customIngesterRunner(monitorCtx, run) })
@@ -130,8 +129,8 @@ func (as *AgentServer) runCommand(run *agentRun) error {
 	if as.options.CustomIngestMetrics != nil {
 		metricsErr = as.collectFinalMetrics(run)
 	}
-	if as.metrics != nil {
-		as.sampleOwnMetrics()
+	if run.context.Metrics != nil {
+		as.sampleOwnMetrics(run.context.Metrics)
 	}
 	if as.options.Progress != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), FinalProgressTimeout)

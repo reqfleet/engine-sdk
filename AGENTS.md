@@ -19,7 +19,7 @@ the engine-specific adapter code and its runnable image.
 | Input artifacts | Serves test scripts, data, optional native config, and dependency declarations selected for the run | Downloads and stages files before the relevant callbacks | Declare expected filenames/formats and consume staged paths; generate engine-local files only where needed |
 | Dependencies | Supplies the declaration, if any, and authorizes the preparation stage | Stages the declaration, invokes the hook, and exposes preparation status | Install, remove, and reconcile dependencies in `PrepareDependencies`, including cancellation and rollback |
 | Lifecycle | Sends prepare/start/stop commands and the stop reason; polls agent status | Coordinator subscription, lifecycle state, command launch, process supervision, and cleanup | Supply `BuildCommand` and any needed preparation, readiness, progress, or graceful-stop hooks |
-| Metrics | Owns tier policy, storage, aggregation, and reporting; the collector scrapes the agent | Owns canonical per-agent collectors and resource sampling; ingests parsed events, serves direct registry updates or native handlers, proxies native endpoints, or explicitly folds URL snapshots | Translate engine output into SDK recording methods, a parser, or a complete native exposition; validate/admit direct samples and retain final output |
+| Metrics | Owns tier policy, storage, aggregation, and reporting; the collector scrapes the agent | Owns per-run collectors, request-name admission, resource sampling and final-snapshot retention; ingests parsed events or recorder updates, serves native handlers, proxies native endpoints, or explicitly folds URL snapshots | Translate engine output into SDK recording methods, a parser, or a complete native exposition; native exporters own validation, admission and final-output retention |
 
 For a new engine, agree the settings schema, artifact/config filenames and
 rendering, dependency format, and image launch requirements with the control-plane
@@ -61,7 +61,7 @@ adapter is supplied here.
 | [`agent/lifecycle.go`](agent/lifecycle.go) | SDK-owned preparation, lifecycle state, observations, and cancellation |
 | [`agent/runtime_unix.go`](agent/runtime_unix.go), [`agent/runtime_unsupported.go`](agent/runtime_unsupported.go) | Unix runtime startup, process supervision and cleanup; explicit execution rejection on non-Unix systems |
 | [`agent/metrics_collection.go`](agent/metrics_collection.go) | SDK-owned `CustomIngestMetrics` runner, cancellation, and final post-exit ingestion |
-| [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/resource_metrics.go`](agent/resource_metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, per-agent `MetricsRegistry`, SDK resource sampling, native admission and folding |
+| [`agent/http.go`](agent/http.go), [`agent/metrics.go`](agent/metrics.go), [`agent/resource_metrics.go`](agent/resource_metrics.go), [`agent/metrics_native.go`](agent/metrics_native.go) | Authenticated endpoints, per-run `MetricsRegistry`, SDK resource sampling, native admission and folding |
 | [`agent/metrics_recorder.go`](agent/metrics_recorder.go) | Per-run `MetricsRecorder`, the public recording API with measurement presence and the shared result-file/recorder validation and admission policy; see the [recorder contract](agent/metrics.md#run-scoped-recorder) |
 | [`protocol`](protocol) | Coordinator messages, explicit run/artifact assignments, lifecycle states, errors, and artifact paths |
 | [`metricschema`](metricschema) | Collector-free metric names, reserved request names, request-name admission, ordered Prometheus labels, and caller-owned histogram boundaries |
@@ -167,16 +167,19 @@ needed. An existing normalized `http.Handler` can be assigned directly to
 `options.MetricsHandler`; do not wrap it in another server or `MetricsURL`.
 
 For adapters that parse engine samples themselves, prefer SDK-owned collectors:
-create `agent.NewMetricsRegistry()` and pass it to `options.MetricsRegistry`.
-Create a `MetricsRecorder` with that registry and the resolved
-`options.LabelsUsageLimit`; pass the recorder to the adapter and set
-`options.CustomIngestMetrics` to its ingestion callback. In `BeforeStart`, call
-`recorder.Reset(run)` once with the supplied `RunContext` to bind identity and
-reset all reporting state; reuse the recorder on subsequent runs. Leave
-`MetricParser`, `MetricsHandler`, and native options unset. Use recorder methods
-rather than defining collectors or reporting CPU/memory. Collection runs independently of
-scrapes, with a final post-exit call before workspace reuse. The registry has no
-public recording methods, and its `Reset` is not a recorder run transition.
+set `options.CustomIngestMetrics` to the ingestion callback and record through
+its supplied `run.Metrics`. The SDK creates a fresh recorder only after successful
+process launch; `PrepareDependencies`, `BeforeStart`, and `BuildCommand` receive
+nil metrics. Its assigned identity, registry and label budget are permanently
+bound to that run. Leave `MetricParser`,
+`MetricsHandler`, and native options unset. Do not inject a registry or reset or
+reuse a recorder for another run. Use recorder methods rather than defining
+collectors or reporting CPU/memory. Collection runs independently of scrapes,
+with a final post-exit call before workspace reuse. Accepting a new run ID through
+prepare or start clears previous SDK metrics immediately; scrapes are empty until
+successful process launch publishes the new registry, including after startup
+failure. Rejected, duplicate, or stale triggers do not clear existing output.
+`run.Metrics.Registry()` exposes gathering, not public recording methods.
 See [the recording and lifecycle contract](agent/metrics.md#sdk-owned-registry).
 
 ## Implement an adapter
@@ -314,15 +317,18 @@ one of these modes:
   `EgressBytes`, and current concurrency into `Threads`. The runtime supplies
   run identity and accumulates metrics; parser errors drop the event. Never
   feed cumulative snapshots into a per-request event parser.
-- **SDK recorder updates:** supply a `MetricsRegistry` and optionally
-  `CustomIngestMetrics`; leave parser and native options unset. Normalize samples
-  and use a `MetricsRecorder` configured with the resolved budget.
-  Call `recorder.Reset(run)` with the callback's assigned `RunContext` before
-  first ingestion and each subsequent run, for example in `BeforeStart`.
-  This one operation binds request/resource identity and clears admission,
-  collectors, resource baseline, and collection errors. Quiesce prior-run
-  ingestion first and retain completed metrics for final scrapes until reset.
-  Sample identity is ignored; do not reset on every collection callback.
+- **SDK recorder updates:** optionally supply `CustomIngestMetrics`; leave parser
+  and native options unset. Normalize samples and use the callback's SDK-provided
+  `run.Metrics`, configured with the resolved budget. Each run gets fresh identity,
+  request names, collectors, resource baseline, and collection errors.
+  The recorder is nil in all prelaunch hooks and is created and published only
+  after successful process launch, before postlaunch workers start.
+  Completion retains the snapshot until the next accepted run ID (prepare or
+  start), which clears SDK output even if startup fails. Rejected, duplicate, and
+  stale triggers do not clear it; matching prepare-to-start does not clear again.
+  In-flight scrapes finish on their captured registry. Native exporter output
+  remains exporter-owned and is not cleared by this SDK registry lifecycle.
+  Sample identity is ignored. Native handler/URL callbacks have nil `run.Metrics`.
   Its `ObserveLatency`, `RecordStatus`, `ObserveRequest`, and `AddReceivedBytes`
   methods validate/admit request names; `SetConcurrency` is independent.
   Use `AddAggregateReceivedBytes` for source-specific aggregate bytes, and

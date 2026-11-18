@@ -23,16 +23,6 @@ func identityFromRun(run RunContext) metricIdentity {
 	}
 }
 
-func identityFromMeta(meta EngineMeta, runID string) metricIdentity {
-	return metricIdentity{
-		collectionID: meta.CollectionID,
-		planID:       meta.PlanID,
-		runID:        runID,
-		agentID:      meta.EngineID,
-		zone:         meta.Zone,
-	}
-}
-
 // bind makes assignment authoritative, including empty assigned fields.
 func (identity *metricIdentity) bind(metric *ShibuyaMetric) {
 	metric.CollectionID = identity.collectionID

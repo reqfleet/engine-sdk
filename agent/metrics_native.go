@@ -21,23 +21,6 @@ import (
 // Default native proxying and MetricsHandler do not enforce this bound.
 const MaxNativeMetricsBytes = 16 << 20
 
-func (as *AgentServer) startMetricsRun(runID string) {
-	if as.options.MetricsHandler != nil {
-		return
-	}
-	if as.options.MetricsURL == "" {
-		as.metrics.startResourceRun(as.options.EngineMeta, runID)
-		as.labelsLock.Lock()
-		as.labelsByRun[runID] = make(map[string]struct{})
-		as.labelsLock.Unlock()
-	} else if as.options.FoldNativeMetrics {
-		as.nativeMetricsLock.Lock()
-		as.nativeMetricsRun = runID
-		as.nativeLabels = make(map[string]struct{})
-		as.nativeMetricsLock.Unlock()
-	}
-}
-
 func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	// Preserve upstream failures, including their status and body.
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
@@ -88,7 +71,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 				return fmt.Errorf("duplicate upstream series in %s", name)
 			}
 			seen[key] = struct{}{}
-			if _, admitted := as.nativeLabels[label.GetValue()]; !admitted && label.GetValue() != overflow {
+			if label.GetValue() != overflow && !as.nativeRequestNames.contains(label.GetValue()) {
 				candidates = append(candidates, label.GetValue())
 			}
 		}
@@ -101,14 +84,12 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 	admitted := candidates[:0]
 	committed := false
 	defer func() {
-		if !committed {
-			for _, name := range admitted {
-				delete(as.nativeLabels, name)
-			}
+		if !committed && len(admitted) > 0 {
+			as.nativeRequestNames.rollback(admitted)
 		}
 	}()
 	for _, name := range candidates {
-		if metricschema.AdmitRequestName(name, as.nativeLabels, as.labelsUsageLimit, overflow) == name {
+		if as.nativeRequestNames.Admit(name) == name {
 			admitted = append(admitted, name)
 		}
 	}
@@ -128,7 +109,7 @@ func (as *AgentServer) foldNativeMetrics(response *http.Response) error {
 				metrics = append(metrics, metric)
 				continue
 			}
-			mapped := metricschema.AdmitRequestName(label.GetValue(), as.nativeLabels, as.labelsUsageLimit, overflow)
+			mapped := as.nativeRequestNames.Admit(label.GetValue())
 			if mapped != label.GetValue() {
 				label.Value = &overflow
 			}

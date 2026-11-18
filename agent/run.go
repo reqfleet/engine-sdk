@@ -25,11 +25,16 @@ type Workspace struct {
 // DependencyFile is empty when the coordinator supplies no declaration; dependency
 // preparation must still reconcile any installation left by a previous run.
 type RunContext struct {
-	RunID          string
-	CollectionID   string
-	PlanID         string
-	AgentID        string
-	Zone           string
+	RunID        string
+	CollectionID string
+	PlanID       string
+	AgentID      string
+	Zone         string
+	// Metrics is the SDK-owned recorder permanently bound to this run after
+	// successful process launch. It is nil in PrepareDependencies, BeforeStart,
+	// and BuildCommand, and always nil with MetricsHandler/MetricsURL.
+	// Post-launch callbacks share it, including final collection. Do not replace it.
+	Metrics        *MetricsRecorder
 	Workspace      Workspace
 	TestFile       string
 	ConfigFile     string

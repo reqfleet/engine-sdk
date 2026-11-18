@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/reqfleet/engine-sdk/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,15 +39,9 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 		resultMetrics bool
 	}{
 		{name: "registry"},
-		{name: "supplied registry", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry()}},
-		{name: "supplied parser registry", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), ResultFile: "results", MetricParser: parser}, resultMetrics: true},
 		{name: "registry collector", options: AgentServerOptions{CustomIngestMetrics: collector}},
-		{name: "supplied registry collector", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), CustomIngestMetrics: collector}},
 		{name: "collector workload output", options: AgentServerOptions{CustomIngestMetrics: collector, ResultFile: "results.csv"}},
 		{name: "negative collector label limit", options: AgentServerOptions{CustomIngestMetrics: collector, LabelsUsageLimit: -1}, invalid: true},
-		{name: "registry handler conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
-		{name: "registry URL conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
-		{name: "registry schema conflict", options: AgentServerOptions{MetricsRegistry: NewMetricsRegistry(), NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
 		{name: "collector parser conflict", options: AgentServerOptions{CustomIngestMetrics: collector, ResultFile: "results", MetricParser: parser}, invalid: true},
 		{name: "collector handler conflict", options: AgentServerOptions{CustomIngestMetrics: collector, MetricsHandler: exporter, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
 		{name: "collector URL conflict", options: AgentServerOptions{CustomIngestMetrics: collector, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1}, invalid: true},
@@ -112,20 +108,22 @@ func TestMetricsOptionsAdmission(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, response.Code)
 }
 
-func TestMetricsHandlerUsesRegistry(t *testing.T) {
-	registry := NewMetricsRegistry()
-	recorder, err := NewMetricsRecorder(registry, 1)
-	require.NoError(t, err)
-	run := RunContext{
-		CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
-	}
-	recorder.Reset(run)
-	as := NewAgentServer(AgentServerOptions{MetricsRegistry: registry, LabelsUsageLimit: 1})
-	require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
+func TestMetricsHandlerSelectsPublishedRun(t *testing.T) {
+	as := NewAgentServer(AgentServerOptions{
+		EngineMeta:       EngineMeta{CollectionID: "collection", PlanID: "plan", EngineID: "engine", Zone: "zone"},
+		LabelsUsageLimit: 1,
+	})
+	handler := as.metricsHandler()
+	assert.Empty(t, nativeScrape(t, handler))
+	run := newTestMetricsRun(t, as, "run")
+	assert.Nil(t, run.Metrics)
+	assert.Empty(t, nativeScrape(t, handler), "unlaunched runs are not published")
+	as.prepareMetricsForRun(&run)
+	require.NoError(t, run.Metrics.RecordEvent(ShibuyaMetric{
 		CollectionID: "source", PlanID: "source", RunID: "source", EngineID: "source", Zone: "source",
 		Label: "checkout", Status: "200", Latency: 250, EgressBytes: 1024, Threads: 7,
 	}))
-	families := nativeScrape(t, as.metricsHandler())
+	families := nativeScrape(t, handler)
 	require.Len(t, families, 4)
 	assert.Equal(t, map[string]float64{"checkout/200": 1}, nativeCounters(families["shibuya_status_counter"]))
 	assert.Equal(t, float64(1024), families["shibuya_egress_bytes_counter"].Metric[0].GetCounter().GetValue())
@@ -145,8 +143,19 @@ func TestMetricsHandlerUsesRegistry(t *testing.T) {
 		assertRecorderMetricLabels(t, family.Metric[0], run, extra)
 	}
 
+	as.finishMetricsRun(run.RunID)
+	assert.Equal(t, families, nativeScrape(t, handler), "completion retains the final snapshot")
+	next := newTestMetricsRun(t, as, "next")
+	assert.Nil(t, next.Metrics)
+	assert.Empty(t, nativeScrape(t, handler), "accepting a new run clears completed output")
+	as.prepareMetricsForRun(&next)
+	require.NoError(t, next.Metrics.ObserveRequest(ShibuyaMetric{Label: "next-request", Status: "201", Latency: 3}))
+	require.NoError(t, run.Metrics.ObserveRequest(ShibuyaMetric{Label: "late-old", Status: "500", Latency: 9}))
+	current := nativeScrape(t, handler)
+	assert.Equal(t, map[string]float64{"next-request/201": 1}, nativeCounters(current["shibuya_status_counter"]))
+	assert.Equal(t, "next", nativeLabelValue(current["shibuya_status_counter"].Metric[0], "run_id"))
 	other := NewAgentServer(AgentServerOptions{})
-	assert.Empty(t, nativeScrape(t, other.metricsHandler()), "a second server must not expose the supplied registry")
+	assert.Empty(t, nativeScrape(t, other.metricsHandler()), "a second server must not expose another run's registry")
 }
 
 func TestPreparationProgressRequiresAuthentication(t *testing.T) {
@@ -358,4 +367,46 @@ func TestInProcessMetricsWithWorkloadOutput(t *testing.T) {
 	f.server.Handler().ServeHTTP(response, request)
 	assert.Equal(t, http.StatusOK, response.Code)
 	assert.Equal(t, "adapter_ready 1\n", response.Body.String())
+}
+
+func TestMetricsHandlerInFlightGatherRetainsOriginalRun(t *testing.T) {
+	server := NewAgentServer(AgentServerOptions{LabelsUsageLimit: 1})
+	handler := server.metricsHandler()
+	first := startTestMetricsRun(t, server, "first")
+	require.NoError(t, first.Metrics.ObserveRequest(ShibuyaMetric{Label: "first-request", Status: "200", Latency: 1}))
+	entered, release := make(chan struct{}), make(chan struct{})
+	releaseGather := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseGather)
+	require.NoError(t, first.Metrics.Registry().registry.Register(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{Name: "test_gather_barrier", Help: "Synchronizes a run transition with an active gather."},
+		func() float64 {
+			close(entered)
+			<-release
+			return 1
+		},
+	)))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- nativeResponse(handler) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTTP gather did not enter the original registry")
+	}
+	next := newTestMetricsRun(t, server, "next")
+	assert.Empty(t, nativeScrape(t, handler), "new scrapes are empty while the captured registry finishes")
+	server.prepareMetricsForRun(&next)
+	require.NoError(t, next.Metrics.ObserveRequest(ShibuyaMetric{Label: "next-request", Status: "201", Latency: 2}))
+	current := nativeScrape(t, handler)
+	assert.Equal(t, map[string]float64{"next-request/201": 1}, nativeCounters(current["shibuya_status_counter"]))
+	releaseGather()
+	select {
+	case response := <-done:
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.Contains(t, response.Body.String(), `run_id="first"`)
+		assert.NotContains(t, response.Body.String(), `run_id="next"`)
+		assert.Contains(t, response.Body.String(), `label="first-request"`)
+		assert.NotContains(t, response.Body.String(), `label="next-request"`)
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTTP gather did not finish after release")
+	}
 }

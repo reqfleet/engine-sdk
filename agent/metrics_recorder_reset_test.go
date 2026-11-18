@@ -5,7 +5,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/reqfleet/engine-sdk/metricschema"
 	"github.com/reqfleet/engine-sdk/resources"
@@ -35,17 +34,16 @@ func assertResetSnapshotIdentity(t *testing.T, families map[string]*dto.MetricFa
 	}
 }
 
-func TestMetricsRecorderResetRetainsThenReplacesEntireRun(t *testing.T) {
-	registry := NewMetricsRegistry()
+func TestMetricsRecorderIndependentRunsRetainEntireSnapshot(t *testing.T) {
+	first, next := resetTestRun("first"), resetTestRun("next")
+	recorder, err := NewMetricsRecorder(first, 2)
+	require.NoError(t, err)
+	registry := recorder.Registry()
 	sampler := &fakeResourceSampler{results: []resourceSampleResult{
 		{err: resources.ErrSampleUnavailable},
 		{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}},
 	}}
 	registry.resources.sampler = sampler
-	recorder, err := NewMetricsRecorder(registry, 2)
-	require.NoError(t, err)
-	first, next := resetTestRun("first"), resetTestRun("next")
-	recorder.Reset(first)
 	for _, label := range []string{"old-request", metricschema.LLMResponseLabel, "old-overflow"} {
 		require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
 			Label: label, Status: "200", Latency: 30, EgressBytes: 100, Threads: 4,
@@ -61,49 +59,32 @@ func TestMetricsRecorderResetRetainsThenReplacesEntireRun(t *testing.T) {
 		"old-request/200": 1, "llm_resp/200": 1, "others/200": 1,
 	}, nativeCounters(retained[metricschema.StatusCounter]))
 	for range 2 {
-		assert.Equal(t, retained, gatherResourceSnapshot(t, registry), "completion alone does not clear any series")
+		assert.Equal(t, retained, gatherResourceSnapshot(t, registry), "final scrapes retain every series")
 	}
 	assert.Equal(t, 2, sampler.sampleCount(), "gathering retained metrics does not advance the CPU baseline")
 
-	otherRegistry := NewMetricsRegistry()
-	otherSampler := &fakeResourceSampler{results: []resourceSampleResult{
-		{sample: resources.Sample{CPUCores: 2, MemoryBytes: 1024}},
-	}}
-	otherRegistry.resources.sampler = otherSampler
-	other, err := NewMetricsRecorder(otherRegistry, 1)
+	nextRecorder, err := NewMetricsRecorder(next, 2)
 	require.NoError(t, err)
-	other.Reset(resetTestRun("independent"))
-	require.NoError(t, other.RecordEvent(ShibuyaMetric{Label: "kept", Status: "202", Latency: 3, EgressBytes: 9, Threads: 2}))
-	require.NoError(t, otherRegistry.sampleResources())
-	otherSnapshot := gatherResourceSnapshot(t, otherRegistry)
-
-	collectionErr := errors.New("final collection failed")
-	registry.setCollectionError(collectionErr)
-	_, err = registry.Gather()
-	require.ErrorIs(t, err, collectionErr)
-	// The existing sampler seam models baseline-only reads, not a second CPU-rate implementation.
-	sampler.results = []resourceSampleResult{
+	nextRegistry := nextRecorder.Registry()
+	require.NotSame(t, registry, nextRegistry)
+	assert.Same(t, registry, recorder.Registry(), "a recorder permanently owns its registry")
+	nextSampler := &fakeResourceSampler{results: []resourceSampleResult{
 		{err: resources.ErrSampleUnavailable},
 		{sample: resources.Sample{CPUCores: 0.75, MemoryBytes: 16384}},
-	}
-	recorder.Reset(next)
-	assert.Empty(t, gatherResourceSnapshot(t, registry), "Reset clears every collector and the collection error")
-	assert.Equal(t, 2, sampler.resets)
-	assert.Equal(t, 2, sampler.sampleCount(), "Reset does not sample resources")
-	assert.Equal(t, otherSnapshot, gatherResourceSnapshot(t, otherRegistry))
-	assert.Equal(t, 1, otherSampler.resets)
-	assert.Equal(t, 1, otherSampler.sampleCount())
-
-	require.NoError(t, registry.sampleResources())
-	assert.Empty(t, gatherResourceSnapshot(t, registry), "the next run cannot publish a rate from the previous baseline")
+	}}
+	nextRegistry.resources.sampler = nextSampler
+	require.Empty(t, gatherResourceSnapshot(t, nextRegistry))
+	require.NoError(t, nextRegistry.sampleResources())
+	assert.Empty(t, gatherResourceSnapshot(t, nextRegistry), "the new run cannot reuse the previous resource baseline")
+	assert.Equal(t, retained, gatherResourceSnapshot(t, registry))
 	for _, label := range []string{"new-request", metricschema.LLMResponseLabel, "new-overflow"} {
-		require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
+		require.NoError(t, nextRecorder.RecordEvent(ShibuyaMetric{
 			Label: label, Status: "201", Latency: 7, EgressBytes: 11, Threads: 2,
 		}))
 	}
-	require.NoError(t, recorder.AddAggregateReceivedBytes(ShibuyaMetric{Label: "new-aggregate", EgressBytes: 19}))
-	require.NoError(t, registry.sampleResources())
-	fresh := gatherResourceSnapshot(t, registry)
+	require.NoError(t, nextRecorder.AddAggregateReceivedBytes(ShibuyaMetric{Label: "new-aggregate", EgressBytes: 19}))
+	require.NoError(t, nextRegistry.sampleResources())
+	fresh := gatherResourceSnapshot(t, nextRegistry)
 	require.Len(t, fresh, 7)
 	assertResetSnapshotIdentity(t, fresh, next)
 	assert.Equal(t, map[string]float64{
@@ -129,164 +110,98 @@ func TestMetricsRecorderResetRetainsThenReplacesEntireRun(t *testing.T) {
 		require.Len(t, fresh[name].Metric, 1)
 		assert.Equal(t, value, fresh[name].Metric[0].GetGauge().GetValue())
 	}
-	assert.Equal(t, otherSnapshot, gatherResourceSnapshot(t, otherRegistry))
-	// Its original admission slot is retained too, rather than just its collectors.
-	require.NoError(t, other.RecordStatus(ShibuyaMetric{Label: "extra", Status: "203"}))
-	assert.Equal(t, map[string]float64{"kept/202": 1, "others/203": 1},
-		nativeCounters(gatherResourceSnapshot(t, otherRegistry)[metricschema.StatusCounter]))
+	assert.Equal(t, retained, gatherResourceSnapshot(t, registry), "new-run writes preserve the old final snapshot")
+	assert.Equal(t, 2, sampler.sampleCount())
+	assert.Equal(t, 2, nextSampler.sampleCount())
+
+	// A retained recorder can still receive stale work, but it cannot write into
+	// the next run or reclaim any of that run's independent admission slots.
+	require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
+		Label: "new-request", Status: "202", Latency: 99, EgressBytes: 123, Threads: 9,
+	}))
+	require.NoError(t, recorder.ObserveLLMResponse(15000))
+	assert.Equal(t, map[string]float64{
+		"old-request/200": 1, "llm_resp/200": 1, "others/200": 1, "others/202": 1,
+	}, nativeCounters(gatherResourceSnapshot(t, registry)[metricschema.StatusCounter]))
+	assert.Equal(t, fresh, gatherResourceSnapshot(t, nextRegistry))
+	collectionErr := errors.New("old run collection failed")
+	registry.setCollectionError(collectionErr)
+	_, err = registry.Gather()
+	require.ErrorIs(t, err, collectionErr)
+	assert.Equal(t, fresh, gatherResourceSnapshot(t, nextRegistry), "collection errors stay on their owning run")
+	_, err = registry.Gather()
+	require.ErrorIs(t, err, collectionErr, "gathering another run must not clear the old error")
 }
 
-// These gates stop inside the existing registry sampler and Prometheus gather
-// seams. They control the transition without sleeping or depending on CPU reads.
-type resetBarrierSampler struct {
-	*fakeResourceSampler
-	entered chan struct{}
-	release <-chan struct{}
-}
-
-func (s *resetBarrierSampler) Reset() {
-	s.fakeResourceSampler.Reset()
-	close(s.entered)
-	<-s.release
-}
-
-type resetBarrierCollector struct {
-	once    sync.Once
-	entered chan struct{}
-	release <-chan struct{}
-}
-
-func (c *resetBarrierCollector) Describe(out chan<- *prometheus.Desc) {
-	out <- prometheus.NewDesc("recorder_reset_test_barrier", "Gather synchronization only", nil, nil)
-}
-
-func (c *resetBarrierCollector) Collect(chan<- prometheus.Metric) {
-	c.once.Do(func() {
-		close(c.entered)
-		<-c.release
-	})
-}
-
-func TestMetricsRecorderResetSynchronizesSamplingGatherAndUpdates(t *testing.T) {
-	registry := NewMetricsRegistry()
-	recorder, err := NewMetricsRecorder(registry, 1)
-	require.NoError(t, err)
+func TestMetricsRecorderInFlightOldSamplingCannotChangeNewRun(t *testing.T) {
 	first, next := resetTestRun("first"), resetTestRun("next")
-	recorder.Reset(first)
-	require.NoError(t, recorder.RecordEvent(ShibuyaMetric{Label: "old", Status: "200", Latency: 20, EgressBytes: 40, Threads: 3}))
+	oldRecorder, err := NewMetricsRecorder(first, 1)
+	require.NoError(t, err)
+	oldRegistry := oldRecorder.Registry()
+	require.NoError(t, oldRecorder.RecordEvent(ShibuyaMetric{
+		Label: "old", Status: "200", Latency: 20, EgressBytes: 40, Threads: 3,
+	}))
 
-	sampleRelease, gatherRelease, resetRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	releaseSample := sync.OnceFunc(func() { close(sampleRelease) })
-	releaseGather := sync.OnceFunc(func() { close(gatherRelease) })
-	releaseReset := sync.OnceFunc(func() { close(resetRelease) })
+	release := make(chan struct{})
+	releaseSample := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseSample)
-	t.Cleanup(releaseGather)
-	t.Cleanup(releaseReset)
-	sampler := &resetBarrierSampler{
-		fakeResourceSampler: &fakeResourceSampler{
-			results: []resourceSampleResult{{sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}, release: sampleRelease}},
-			entered: make(chan int, 2),
-		},
-		entered: make(chan struct{}), release: resetRelease,
+	sampler := &fakeResourceSampler{
+		results: []resourceSampleResult{{
+			sample: resources.Sample{CPUCores: 0.5, MemoryBytes: 8192}, release: release,
+		}},
+		entered: make(chan int, 1),
 	}
-	registry.resources.sampler = sampler
-	collector := &resetBarrierCollector{entered: make(chan struct{}), release: gatherRelease}
-	registry.registry.MustRegister(collector)
-
+	oldRegistry.resources.sampler = sampler
 	sampled := make(chan error, 1)
-	go func() { sampled <- registry.sampleResources() }()
-	<-sampler.fakeResourceSampler.entered
-	type gatherResult struct {
-		families []*dto.MetricFamily
-		err      error
-	}
-	gathered := make(chan gatherResult, 1)
-	go func() {
-		families, err := registry.Gather()
-		gathered <- gatherResult{families: families, err: err}
-	}()
-	<-collector.entered
-	resetStarted, resetDone := make(chan struct{}), make(chan struct{})
-	go func() {
-		close(resetStarted)
-		recorder.Reset(next)
-		close(resetDone)
-	}()
-	<-resetStarted
-	// Old sampling and the old scrape finish before the transition can clear them.
+	go func() { sampled <- oldRegistry.sampleResources() }()
+	<-sampler.entered
+
+	// The old sample is deliberately still in flight while the next run records
+	// and gathers its own measurements. No reset lock or timing assumption is needed.
+	nextRecorder, err := NewMetricsRecorder(next, 1)
+	require.NoError(t, err)
+	nextRegistry := nextRecorder.Registry()
+	nextRegistry.resources.sampler = &fakeResourceSampler{results: []resourceSampleResult{
+		{sample: resources.Sample{CPUCores: 0.75, MemoryBytes: 16384}},
+	}}
+	require.NoError(t, nextRecorder.RecordEvent(ShibuyaMetric{
+		Label: "new", Status: "201", Latency: 7, EgressBytes: 13, Threads: 9,
+	}))
+	require.NoError(t, nextRegistry.sampleResources())
+	fresh := gatherResourceSnapshot(t, nextRegistry)
+	require.Len(t, fresh, 6)
+	assertResetSnapshotIdentity(t, fresh, next)
 	releaseSample()
 	require.NoError(t, <-sampled)
-	releaseGather()
-	old := <-gathered
-	require.NoError(t, old.err)
-	oldFamilies := make(map[string]*dto.MetricFamily)
-	for _, family := range old.families {
-		oldFamilies[family.GetName()] = family
-	}
-	assertResetSnapshotIdentity(t, oldFamilies, first)
-	require.Contains(t, oldFamilies, metricschema.StatusCounter)
-	assert.Equal(t, map[string]float64{"old/200": 1}, nativeCounters(oldFamilies[metricschema.StatusCounter]))
-	<-sampler.entered // Reset now holds its transition locks inside sampler.Reset.
 
-	operations := []func() error{
-		func() error { return recorder.ObserveRequest(ShibuyaMetric{Label: "new", Status: "201", Latency: 7}) },
-		func() error {
-			return recorder.AddAggregateReceivedBytes(ShibuyaMetric{Label: "aggregate", EgressBytes: 13})
-		},
-		func() error {
-			recorder.SetConcurrency(ShibuyaMetric{Threads: 9})
-			return nil
-		},
-		registry.sampleResources,
+	var workers sync.WaitGroup
+	for range 4 {
+		workers.Go(func() {
+			for range 25 {
+				assert.NoError(t, oldRecorder.RecordEvent(ShibuyaMetric{
+					Label: "new", Status: "202", Latency: 2, EgressBytes: 5, Threads: 1,
+				}))
+				_, err := oldRegistry.Gather()
+				assert.NoError(t, err)
+				_, err = nextRegistry.Gather()
+				assert.NoError(t, err)
+			}
+		})
 	}
-	started, finished := make(chan struct{}, len(operations)), make(chan error, len(operations))
-	for _, operation := range operations {
-		go func() {
-			started <- struct{}{}
-			finished <- operation()
-		}()
-	}
-	for range operations {
-		<-started
-	}
-	scrapeStarted := make(chan struct{})
-	go func() {
-		close(scrapeStarted)
-		families, err := registry.Gather()
-		gathered <- gatherResult{families: families, err: err}
-	}()
-	<-scrapeStarted
-	releaseReset()
-	<-resetDone
-	for range operations {
-		require.NoError(t, <-finished)
-	}
-	during := <-gathered
-	require.NoError(t, during.err)
-	concurrentFamilies := make(map[string]*dto.MetricFamily)
-	for _, family := range during.families {
-		concurrentFamilies[family.GetName()] = family
-	}
-	// Ordinary updates need not appear atomically across families, but a scrape
-	// admitted after Reset cannot include any previous-run identity or values.
-	assertResetSnapshotIdentity(t, concurrentFamilies, next)
-	fresh := gatherResourceSnapshot(t, registry)
-	assertResetSnapshotIdentity(t, fresh, next)
-	require.Contains(t, fresh, metricschema.StatusCounter)
+	workers.Wait()
+	old := gatherResourceSnapshot(t, oldRegistry)
+	assertResetSnapshotIdentity(t, old, first)
+	assert.Equal(t, map[string]float64{"old/200": 1, "others/202": 100}, nativeCounters(old[metricschema.StatusCounter]))
+	assert.Equal(t, 0.5, old[metricschema.CPUGauge].Metric[0].GetGauge().GetValue())
+	assert.Equal(t, 8192.0, old[metricschema.MemoryGauge].Metric[0].GetGauge().GetValue())
+	assert.Equal(t, fresh, gatherResourceSnapshot(t, nextRegistry))
 	assert.Equal(t, map[string]float64{"new/201": 1}, nativeCounters(fresh[metricschema.StatusCounter]))
-	require.Contains(t, fresh, metricschema.RequestLatency)
-	require.Len(t, fresh[metricschema.RequestLatency].Metric, 1)
 	assert.Equal(t, uint64(1), fresh[metricschema.RequestLatency].Metric[0].GetHistogram().GetSampleCount())
 	assert.Equal(t, 7.0, fresh[metricschema.RequestLatency].Metric[0].GetHistogram().GetSampleSum())
-	require.Contains(t, fresh, metricschema.EgressBytesCounter)
-	require.Len(t, fresh[metricschema.EgressBytesCounter].Metric, 1)
-	assert.Equal(t, "aggregate", nativeLabelValue(fresh[metricschema.EgressBytesCounter].Metric[0], "label"))
 	assert.Equal(t, 13.0, fresh[metricschema.EgressBytesCounter].Metric[0].GetCounter().GetValue())
 	for name, value := range map[string]float64{
-		metricschema.ThreadsGauge: 9, metricschema.CPUGauge: 0.5, metricschema.MemoryGauge: 8192,
+		metricschema.ThreadsGauge: 9, metricschema.CPUGauge: 0.75, metricschema.MemoryGauge: 16384,
 	} {
-		require.Contains(t, fresh, name)
-		require.Len(t, fresh[name].Metric, 1)
 		assert.Equal(t, value, fresh[name].Metric[0].GetGauge().GetValue())
 	}
 }

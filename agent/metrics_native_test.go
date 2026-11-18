@@ -122,7 +122,7 @@ func TestNativeMetricsNumericLabelBudget(t *testing.T) {
 			text := nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{"b", "200", 3, 20}, {"a", "200", 1, 10}, {"others", "200", 5, 30}})
 			source, _ := nativeSource(t, text)
 			as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: test.limit})
-			as.startMetricsRun("run")
+			startTestMetricsRun(t, as, "run")
 			handler := as.metricsHandler()
 			for range 2 {
 				families := nativeScrape(t, handler)
@@ -138,7 +138,7 @@ func TestNativeMetricsStableAdmissionAndCumulativeAggregation(t *testing.T) {
 	observations := []nativeObservation{{"z", "200", 1, 10}}
 	source, publish := nativeSource(t, nativeSnapshot(t, nativeTestMeta, "run", observations))
 	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
-	as.startMetricsRun("run")
+	startTestMetricsRun(t, as, "run")
 	handler := as.metricsHandler()
 	assert.Equal(t, map[string]float64{"z/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
 	observations = append(observations, nativeObservation{"a", "200", 2, 20}, nativeObservation{"b", "500", 10, 30}, nativeObservation{"others", "200", 100, 40})
@@ -184,11 +184,20 @@ func TestNativeMetricsStableAdmissionAndCumulativeAggregation(t *testing.T) {
 func TestNativeMetricsReplayOverflowConvention(t *testing.T) {
 	source, publish := nativeSource(t, nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{"a", "200", 1, 1}}))
 	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, NativeMetricsOverflowLabel: "_other_", LabelsUsageLimit: 1})
-	as.startMetricsRun("run")
+	startTestMetricsRun(t, as, "run")
 	handler := as.metricsHandler()
 	assert.Equal(t, map[string]float64{"a/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
 	publish(nativeSnapshot(t, nativeTestMeta, "run", []nativeObservation{{"a", "200", 1, 1}, {"_other_", "200", 1, 1}, {"b", "200", 1, 1}, {"others", "200", 1, 1}}))
 	assert.Equal(t, map[string]float64{"a/200": 1, "_other_/200": 3}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
+
+	t.Run("zero budget", func(t *testing.T) {
+		options := as.options
+		options.LabelsUsageLimit = 0
+		server := NewAgentServer(options)
+		startTestMetricsRun(t, server, "run")
+		assert.Equal(t, map[string]float64{"_other_/200": 4},
+			nativeCounters(nativeScrape(t, server.metricsHandler())[metricschema.StatusCounter]))
+	})
 }
 
 func TestNativeMetricsFinishAndNextRun(t *testing.T) {
@@ -216,7 +225,7 @@ func TestNativeMetricsFailedFoldPreservesEarlierAdmissions(t *testing.T) {
 		FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL,
 		NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 2,
 	})
-	as.startMetricsRun("run")
+	startTestMetricsRun(t, as, "run")
 	handler := as.metricsHandler()
 	assert.Equal(t, map[string]float64{"z/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
 
@@ -272,7 +281,7 @@ func TestNativeMetricsRejectsMalformedScrapesWithoutConsumingBudget(t *testing.T
 		t.Run(name, func(t *testing.T) {
 			source, publish := nativeSource(t, invalid)
 			as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
-			as.startMetricsRun("run")
+			startTestMetricsRun(t, as, "run")
 			handler := as.metricsHandler()
 			response := nativeResponse(handler)
 			require.Equal(t, http.StatusBadGateway, response.Code, response.Body.String())
@@ -316,7 +325,7 @@ func TestNativeMetricsQuotedHistogramSamples(t *testing.T) {
 			invalid, sum, count := snapshot(`a",}\path`)
 			source, publish := nativeSource(t, invalid)
 			as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
-			as.startMetricsRun("run")
+			startTestMetricsRun(t, as, "run")
 			handler := as.metricsHandler()
 			for _, duplicate := range []string{strings.TrimSuffix(sum, " 3\n") + " 9\n", count} {
 				publish(invalid + duplicate)
@@ -364,7 +373,7 @@ func TestNativeMetricsAdmissionAcrossFamiliesAndScrapeOrder(t *testing.T) {
 	for _, initial := range []string{atLimit, "# TYPE shibuya_status_counter counter\n" + counter("a") + counter("b")} {
 		source, publish := nativeSource(t, initial)
 		as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 2})
-		as.startMetricsRun("run")
+		startTestMetricsRun(t, as, "run")
 		handler := as.metricsHandler()
 		assert.Equal(t, map[string]float64{"a/200": 1, "b/200": 1}, nativeCounters(nativeScrape(t, handler)[metricschema.StatusCounter]))
 		publish(atLimit + counter("c") + "# TYPE shibuya_egress_bytes_counter counter\nshibuya_egress_bytes_counter{" + identity + `,label="d"} 12` + "\n")
@@ -377,7 +386,7 @@ func TestNativeMetricsAdmissionAcrossFamiliesAndScrapeOrder(t *testing.T) {
 	text := "# TYPE shibuya_status_counter counter\n" + counter("z") + "# TYPE shibuya_egress_bytes_counter counter\nshibuya_egress_bytes_counter{" + identity + `,label="a"} 12` + "\n"
 	source, _ := nativeSource(t, text)
 	as := NewAgentServer(AgentServerOptions{FoldNativeMetrics: true, EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
-	as.startMetricsRun("run")
+	startTestMetricsRun(t, as, "run")
 	families := nativeScrape(t, as.metricsHandler())
 	assert.Equal(t, map[string]float64{"others/200": 1}, nativeCounters(families[metricschema.StatusCounter]))
 	assert.Equal(t, map[string]float64{"a": 12}, nativeCounters(families[metricschema.EgressBytesCounter]))
@@ -400,7 +409,7 @@ func TestNativeMetricsDefaultStreamsBeforeSnapshotCompletes(t *testing.T) {
 	}))
 	defer source.Close()
 	as := NewAgentServer(AgentServerOptions{EngineMeta: nativeTestMeta, MetricsURL: source.URL, NativeMetricsSchema: MetricsSchemaShibuyaV1, LabelsUsageLimit: 1})
-	as.startMetricsRun("run")
+	startTestMetricsRun(t, as, "run")
 	proxy := httptest.NewServer(as.metricsHandler())
 	defer proxy.Close()
 	// Always unblock the upstream before closing either server on failure.

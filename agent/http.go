@@ -8,14 +8,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
-
-// MetricsRegistry returns this server's canonical collectors, or nil when a
-// MetricsHandler or MetricsURL supplies the complete native exposition.
-func (as *AgentServer) MetricsRegistry() *MetricsRegistry {
-	return as.metrics
-}
 
 func (as *AgentServer) metricsHandler() http.Handler {
 	if err := as.validateMetricsOptions(); err != nil {
@@ -27,7 +22,7 @@ func (as *AgentServer) metricsHandler() http.Handler {
 		return as.options.MetricsHandler
 	}
 	if as.options.MetricsURL == "" {
-		return promhttp.HandlerFor(as.metrics, promhttp.HandlerOpts{})
+		return promhttp.HandlerFor(prometheus.GathererFunc(as.gatherMetrics), promhttp.HandlerOpts{})
 	}
 	target, _ := url.Parse(as.options.MetricsURL) // Checked by validateMetricsOptions.
 	proxy := &httputil.ReverseProxy{

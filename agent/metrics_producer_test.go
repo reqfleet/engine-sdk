@@ -25,12 +25,11 @@ func TestMetricsRegistryUsesLabelSpecificLatencyHistogram(t *testing.T) {
 		{"ttft", "shibuya_latency_label_milliseconds"},
 	} {
 		t.Run(test.label, func(t *testing.T) {
-			registry := NewMetricsRegistry()
-			recorder, err := NewMetricsRecorder(registry, 1)
-			require.NoError(t, err)
-			recorder.Reset(RunContext{
+			recorder, err := NewMetricsRecorder(RunContext{
 				CollectionID: "collection-1", PlanID: "plan-1", RunID: "run-1", AgentID: "engine-1", Zone: "zone-1",
-			})
+			}, 1)
+			require.NoError(t, err)
+			registry := recorder.Registry()
 			require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
 				Label:        test.label,
 				CollectionID: "collection-1",
@@ -89,12 +88,11 @@ func TestLatencyHistogramWireContract(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			registry := NewMetricsRegistry()
-			recorder, err := NewMetricsRecorder(registry, 1)
-			require.NoError(t, err)
-			recorder.Reset(RunContext{
+			recorder, err := NewMetricsRecorder(RunContext{
 				CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
-			})
+			}, 1)
+			require.NoError(t, err)
+			registry := recorder.Registry()
 			var sum float64
 			for _, observation := range test.observations {
 				require.NoError(t, recorder.RecordEvent(ShibuyaMetric{
@@ -141,12 +139,11 @@ func TestLatencyHistogramWireContract(t *testing.T) {
 }
 
 func TestMetricsRegistryIndependentUpdates(t *testing.T) {
-	registry := NewMetricsRegistry()
-	recorder, err := NewMetricsRecorder(registry, 1)
-	require.NoError(t, err)
-	recorder.Reset(RunContext{
+	recorder, err := NewMetricsRecorder(RunContext{
 		CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
-	})
+	}, 1)
+	require.NoError(t, err)
+	registry := recorder.Registry()
 	metric := ShibuyaMetric{
 		CollectionID: "collection",
 		PlanID:       "plan",
@@ -199,12 +196,11 @@ func TestMetricsRegistryIndependentUpdates(t *testing.T) {
 	assert.Equal(t, float64(192), families["shibuya_egress_bytes_counter"].Metric[0].GetCounter().GetValue())
 
 	t.Run("reserved request label remains ordinary", func(t *testing.T) {
-		registry := NewMetricsRegistry()
-		recorder, err := NewMetricsRecorder(registry, 1)
-		require.NoError(t, err)
-		recorder.Reset(RunContext{
+		recorder, err := NewMetricsRecorder(RunContext{
 			CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
-		})
+		}, 1)
+		require.NoError(t, err)
+		registry := recorder.Registry()
 		metric.Label = "llm_resp"
 		require.NoError(t, recorder.ObserveRequest(metric))
 		families := gatherCanonicalMetrics(t, registry)
@@ -227,14 +223,14 @@ func TestMetricsRegistryIndependentLatencyAndStatus(t *testing.T) {
 		{"status", (*MetricsRecorder).RecordStatus, "shibuya_status_counter"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			for _, state := range []string{"empty", "populated", "reset"} {
+			for _, state := range []string{"empty", "populated", "independent-run"} {
 				t.Run(state, func(t *testing.T) {
-					registry := NewMetricsRegistry()
-					recorder, err := NewMetricsRecorder(registry, 1)
-					require.NoError(t, err)
-					recorder.Reset(RunContext{
+					run := RunContext{
 						CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
-					})
+					}
+					recorder, err := NewMetricsRecorder(run, 1)
+					require.NoError(t, err)
+					registry := recorder.Registry()
 					metric := ShibuyaMetric{
 						CollectionID: "collection",
 						PlanID:       "plan",
@@ -252,10 +248,17 @@ func TestMetricsRegistryIndependentLatencyAndStatus(t *testing.T) {
 						require.NoError(t, recorder.AddReceivedBytes(metric))
 						recorder.SetConcurrency(metric)
 					}
-					if state == "reset" {
+					if state == "independent-run" {
 						require.NoError(t, test.record(recorder, metric))
-						registry.Reset()
+						retained := gatherCanonicalMetrics(t, registry)
+						previous := registry
+						recorder, err = NewMetricsRecorder(run, 1)
+						require.NoError(t, err)
+						registry = recorder.Registry()
 						require.Empty(t, gatherCanonicalMetrics(t, registry))
+						t.Cleanup(func() {
+							assert.Equal(t, retained, gatherCanonicalMetrics(t, previous))
+						})
 					}
 					before := gatherCanonicalMetrics(t, registry)
 
@@ -312,21 +315,19 @@ func TestMetricsRegistryIndependentLatencyAndStatus(t *testing.T) {
 }
 
 func TestMetricsRegistryInstancesAreIndependent(t *testing.T) {
-	first := NewMetricsRegistry()
-	second := NewMetricsRegistry()
-	firstRecorder, err := NewMetricsRecorder(first, 1)
-	require.NoError(t, err)
 	firstRun := RunContext{
 		CollectionID: "collection", PlanID: "plan", RunID: "run", AgentID: "engine", Zone: "zone",
 	}
-	firstRecorder.Reset(firstRun)
-	secondRecorder, err := NewMetricsRecorder(second, 1)
+	firstRecorder, err := NewMetricsRecorder(firstRun, 1)
 	require.NoError(t, err)
+	first := firstRecorder.Registry()
 	secondRun := RunContext{
 		CollectionID: "second-collection", PlanID: "second-plan", RunID: "second-run",
 		AgentID: "second-engine", Zone: "second-zone",
 	}
-	secondRecorder.Reset(secondRun)
+	secondRecorder, err := NewMetricsRecorder(secondRun, 1)
+	require.NoError(t, err)
+	second := secondRecorder.Registry()
 	metric := ShibuyaMetric{
 		CollectionID: "collection",
 		PlanID:       "plan",
@@ -388,15 +389,21 @@ func TestMetricsRegistryInstancesAreIndependent(t *testing.T) {
 			assertRecorderMetricLabels(t, family.Metric[0], test.run, extra)
 		}
 	}
-	secondBeforeReset := gatherCanonicalMetrics(t, second)
-	first.Reset()
-	require.Empty(t, gatherCanonicalMetrics(t, first))
-	assert.Equal(t, secondBeforeReset, gatherCanonicalMetrics(t, second))
-	require.NoError(t, firstRecorder.RecordEvent(metric))
-	families := gatherCanonicalMetrics(t, first)
+	firstSnapshot := gatherCanonicalMetrics(t, first)
+	secondSnapshot := gatherCanonicalMetrics(t, second)
+	thirdRecorder, err := NewMetricsRecorder(resetTestRun("third"), 1)
+	require.NoError(t, err)
+	third := thirdRecorder.Registry()
+	require.Empty(t, gatherCanonicalMetrics(t, third))
+	require.NoError(t, thirdRecorder.RecordEvent(metric))
+	families := gatherCanonicalMetrics(t, third)
 	require.Contains(t, families, "shibuya_status_counter")
 	assert.Equal(t, float64(1), families["shibuya_status_counter"].Metric[0].GetCounter().GetValue())
-	assert.Equal(t, secondBeforeReset, gatherCanonicalMetrics(t, second))
+	assert.Equal(t, firstSnapshot, gatherCanonicalMetrics(t, first))
+	assert.Equal(t, secondSnapshot, gatherCanonicalMetrics(t, second))
+	require.NoError(t, firstRecorder.RecordEvent(metric))
+	assert.Equal(t, families, gatherCanonicalMetrics(t, third))
+	assert.Equal(t, secondSnapshot, gatherCanonicalMetrics(t, second))
 }
 
 func gatherCanonicalMetrics(t *testing.T, registry *MetricsRegistry) map[string]*dto.MetricFamily {
