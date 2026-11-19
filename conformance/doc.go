@@ -1,8 +1,8 @@
 // Package conformance provides optional, engine-independent adapter contract tests.
-// It validates the public SDK protocol and normalized metrics, not control-plane
-// registration, deployment configuration, or compatibility with a particular
-// Reqfleet deployment. Importing this package does not start listeners, launch
-// workloads, or make the importing process a subreaper.
+// It validates the public SDK protocol and normalized metrics. Control-plane
+// registration, deployment configuration, and compatibility with a particular
+// Reqfleet deployment are outside its scope. Importing this package starts no
+// listeners or workloads and leaves process supervision unchanged.
 //
 // # Metric assertions and independent evidence
 //
@@ -12,14 +12,14 @@
 // braces. The [SDK metrics contract] remains authoritative for names, labels,
 // units, histogram boundaries, and accumulation semantics.
 //
-// Expected values must come from independently parsed engine-native output or
-// other independent workload evidence, not from the normalized scrape being
-// tested or the production parser/exporter under test. Keep native parsers,
-// scripts, error mappings, engine versions, and runtime dependencies in the
-// adapter repository. Preserve independently available status counts, latency
-// observations, received bytes, and concurrency; do not invent measurements an
-// engine does not produce. MetricsSnapshot supports comparisons of repeated and
-// retained final scrapes without conflating independently changing resources.
+// Derive expected values from independently parsed engine-native output or other
+// independent workload evidence. Keep the oracle independent of the normalized
+// scrape and production parser/exporter under test. Keep native parsers, scripts,
+// error mappings, engine versions, and runtime dependencies in the adapter
+// repository. Preserve independently available status counts, latency observations,
+// received bytes, and concurrency. Omit measurements the engine does not produce.
+// MetricsSnapshot compares repeated and retained final scrapes while keeping
+// independently changing resources separate.
 //
 // # Runtime extension points
 //
@@ -48,9 +48,9 @@
 // observations. Retained series from other runs do not affect this choice.
 // Transport, HTTP, and parsing failures are retried only within Wait. Explicit
 // Scrape calls and final metric assertions still require a successful response.
-// Send tracks cleanup by the command addressed to the harness plan, not the
-// envelope verb. BlockedFile chooses a synthetic test/dependency artifact name
-// that does not shadow supplied artifacts.
+// Send tracks cleanup using the command addressed to the harness plan. The
+// envelope verb has no effect on cleanup tracking. BlockedFile chooses a
+// synthetic test/dependency artifact name distinct from supplied artifacts.
 //
 // # Container isolation and prerequisites
 //
@@ -79,8 +79,8 @@
 // uses a dedicated supervisor subprocess to reap adopted descendants, including
 // separate process groups, without reaping unrelated test children. Only an
 // explicit internal supervisor re-exec activates the guarded init path; ordinary
-// imports do not change process supervision. Unconfirmed descendant cleanup
-// terminates the test process rather than contaminating the next scenario.
+// imports leave process supervision unchanged. Unconfirmed descendant cleanup
+// terminates the test process to isolate subsequent scenarios.
 //
 // # Consumer test wiring
 //
@@ -91,23 +91,24 @@
 //	mv conformance.test /out/conformance-runtime
 //	go test -c -tags=integration -o /out/conformance-engine ./myengine/conformance
 //
-// The engine-local package imports this package and calls Run with its Contract.
-// Importing Run does not include this package's own regression tests in the
-// consumer's test binary, so both binaries are required. Copy both into the
-// consumer's conformance image and execute them sequentially, as root, only in
-// the isolated disposable container described above. Allow sufficient test
-// timeouts for natural completion and bounded cleanup. Shared regressions cover
-// short-lived completion, unsuccessful completion, zero-only request measurements,
-// preparation cancellation, addressed-command cleanup, artifact-name collisions,
-// rejected overlaps, stale stops that initiate slow shutdown, transient scrape
-// recovery, query-sensitive run IDs, cleanup deadlines, separate process groups,
-// and live orphan reaping using a real SDK fixture adapter and child HTTP workloads.
+// Engine-local tests import this package and call Run with their Contract.
+// Build shared regressions separately; importing Run includes only the harness.
+// Copy both binaries into the conformance image and run them sequentially as root.
+// Use only the isolated disposable container described above.
+// Allow time for natural completion and bounded cleanup.
+//
+// Shared regressions use a real SDK fixture adapter and child HTTP workloads.
+// They cover short-lived and unsuccessful completion, zero-only request measurements,
+// preparation cancellation, addressed-command cleanup, and artifact-name collisions.
+// Further cases cover rejected overlaps, stale stops with slow shutdown,
+// transient scrape recovery, query-sensitive run IDs, and cleanup deadlines.
+// Process checks cover separate groups and live orphan reaping.
 //
 // Include this package's untagged metric-validator tests in the consumer's unit
 // target (go test github.com/reqfleet/engine-sdk/conformance), and gate consumer
-// CI/publication on its container conformance target. A passing fixture suite is
-// evidence for the tested adapter/engine/SDK combination, not a deployment
-// compatibility guarantee.
+// CI/publication on its container conformance target. A passing fixture suite
+// provides evidence for the tested adapter/engine/SDK combination. Deployment
+// compatibility requires separate verification.
 //
 // [SDK metrics contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md
 package conformance

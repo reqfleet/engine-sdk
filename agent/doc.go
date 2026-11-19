@@ -11,22 +11,22 @@
 //
 // # Coordinator authority
 //
-// An agent is not a standalone runner. The coordinator authorizes preparation,
-// start and stop, and supplies an explicit RunSpec for the addressed agent.
+// Agents require coordinator authorization for preparation, start and stop.
+// The coordinator supplies an explicit RunSpec for the addressed agent.
 // Settings are already resolved: adapters must not interpret VU scope, redistribute
 // load, infer settings from topology or manufacture a missing assignment. Native
 // settings may already be rendered into coordinator-provided configuration files.
-// Artifact assignments are per file, not derived from the agent's identity.
-// Materialized input has already been partitioned; native input requires the
+// Each file carries its own artifact assignment, independent of agent identity.
+// Materialized input has already been partitioned. Native input requires the
 // engine to apply the exact supplied shard. Replicated input is consumed whole.
 //
 // # Callback order and ownership
 //
 // PrepareDependencies receives the staged dependency declaration, if any. An
 // absent declaration still invokes reconciliation to remove prior dependencies.
-// A coordinator preparation barrier may separate this stage from start. Execution
-// artifacts are staged before BeforeStart, then BuildCommand returns the primary
-// command. No callback launches or reaps the primary workload; the runtime owns it.
+// A coordinator preparation barrier may separate this stage from start.
+// Execution artifacts are staged before BeforeStart. BuildCommand then returns
+// the primary command. The runtime exclusively owns its launch and reaping.
 // Context paths are absolute. Inputs, results and temporary files are reset per
 // run. State and dependency reconciliation files survive. The current runtime
 // serializes runs and reuses the existing image paths only after cleanup ends.
@@ -37,22 +37,22 @@
 // or status requests. Their read-only RunContext remains valid until each callback
 // returns. Callbacks must honor context cancellation, including child processes.
 // Each Observe context is bounded by ObservationTimeout (five seconds).
-// Callbacks may cache engine-private summaries by RunID, but must not mutate the
-// supplied settings or artifact maps. BuildCommand is required; other hooks are
-// optional. Without Observe, a successful launch acknowledges readiness.
+// Callbacks may cache engine-private summaries by RunID.
+// Treat supplied settings and artifact maps as read-only.
+// BuildCommand is required; other hooks are optional.
+// Without Observe, a successful launch acknowledges readiness.
 //
 // # Outcomes and shutdown
 //
-// Startup acknowledgement and terminal outcome are independent. WorkComplete
-// acknowledges that startup succeeded but cannot override a failed process.
+// Startup acknowledgement and terminal outcome are independent.
+// WorkComplete acknowledges startup success. Process failure still fails the run.
 // A successful short run completes even if readiness was never polled. A nonzero
 // exit after readiness is an execution failure. Optional progress cannot change
 // lifecycle state or make the status endpoint unavailable. Progress payloads must
 // be valid JSON and identify their engine schema; aggregation belongs to the
 // coordinator. After canceling and joining the live monitors, the runtime captures
 // a final progress snapshot with a fresh context bounded by FinalProgressTimeout
-// (two seconds). Adapters should reuse cached summaries/checkpoints rather than
-// restart canceled long-running work.
+// (two seconds). Reuse cached summaries/checkpoints for this final call.
 //
 // Stop targets a run and carries the coordinator's reason: scheduled completion
 // or cancellation. Preparation cancellation prevents launch, even if a hook
@@ -64,9 +64,10 @@
 // terminate child processes. For a running workload, Stop receives a fresh
 // context bounded by StopTimeout (DefaultStopTimeout,
 // ten seconds, by default). Without Stop the runtime sends SIGTERM to the process
-// group; after the grace period it sends SIGKILL. Stop must honor its context and must not wait on
-// the primary process. The runtime reaps it, terminates remaining descendants and
-// joins all callbacks/readers before releasing the workspace for another run.
+// group; after the grace period it sends SIGKILL. Stop must honor its context
+// and must not wait on the primary process. The runtime reaps it, terminates
+// remaining descendants and joins all callbacks/readers before releasing the
+// workspace for another run.
 //
 // Duplicate requests do not execute a run twice. Retired run IDs are remembered
 // for the agent process lifetime. A stale stop or callback cannot affect a newer
@@ -79,14 +80,15 @@
 // Adapters map result-file events with MetricParser, record normalized samples
 // through MetricsRecorder (optionally using CustomIngestMetrics for ingestion), or
 // declare MetricsSchemaShibuyaV1 for a normalized MetricsHandler or MetricsURL.
-// Parser, collection callback, and native sources are mutually exclusive. Registry-only
-// serving without ingestion does not provide complete request reporting.
+// Parser, collection callback, and native sources are mutually exclusive.
+// Registry-only serving without ingestion provides incomplete request reporting.
 // See the [metrics contract] for names, units, labels, bucket profiles,
 // accumulation semantics, and built-in adapter limitations.
 //
-// MetricsRegistry owns per-run collectors and exposes gathering, not public
-// recording methods. MetricsRecorder.ObserveLatency, RecordStatus,
-// AddReceivedBytes, and SetConcurrency update independent measurements.
+// MetricsRegistry owns per-run collectors and exposes gathering.
+// Public recording methods belong to MetricsRecorder. Its ObserveLatency,
+// RecordStatus, AddReceivedBytes, and SetConcurrency methods update independent
+// measurements.
 // ObserveLLMResponse records an independent, finite nonnegative millisecond timing
 // in the wide LLM response histogram, even when shared admission folds llm_resp
 // into others; it creates no ordinary latency, status, bytes, or concurrency.
@@ -94,8 +96,8 @@
 // timings and use the ordinary histogram under ttft and tps. RecordReceivedToken
 // counts one received generated token under tps with status 200, without timing,
 // bytes, or concurrency. All share recorder admission and assigned identity.
-// ObserveRequest records latency and status together; RecordEvent handles complete
-// events. Omit unavailable measurements rather than fabricating zero values.
+// ObserveRequest records latency and status together.
+// RecordEvent handles complete events. Omit unavailable measurements.
 // The SDK creates RunContext.Metrics only after successful process launch, before
 // starting postlaunch workers. It is nil in PrepareDependencies, BeforeStart and
 // BuildCommand; native handler/URL modes always supply nil. Identity and registry
@@ -108,7 +110,8 @@
 // independent recorder and an error for a negative limit, without environment
 // loading or workers. Registry() returns its permanently bound registry.
 // There are no global collectors, registry injection or recorder reset operations.
-// Successful process launch, not readiness, publishes the new run's registry.
+// Successful process launch publishes the new run's registry.
+// Publication is independent of readiness.
 // Completion retains its final snapshot until a new run ID is accepted through
 // prepare or start. Acceptance clears prior SDK output immediately; scrapes are
 // empty until launch, including after preparation or startup failure. Rejected,
@@ -136,9 +139,10 @@
 // The [request-label validation contract] defines whole-sample rejection,
 // zero-budget handling, and native scrape behavior.
 //
-// Runtime label admission uses AgentServerOptions.LabelsUsageLimit, not coordinator
-// run messages. LoadAgentServerOptions resolves the lowercase label_limit
-// environment variable (metricschema.DefaultLabelLimit, ten, when unset or empty);
+// Runtime label admission uses AgentServerOptions.LabelsUsageLimit.
+// Coordinator run messages have no effect on this budget. LoadAgentServerOptions
+// resolves the lowercase label_limit environment variable
+// (metricschema.DefaultLabelLimit, ten, when unset or empty).
 // MakeAgentServer uses the same loader. NewAgentServer preserves zero.
 // Adapters can initialize native exporters from those options before construction.
 // metricschema.AdmitRequestName shares the SDK's bounded, stable admission policy
@@ -148,11 +152,11 @@
 // admission with a fixed nonnegative budget and overflow-only behavior at zero.
 // Admit requires a validated source name; the recorder validates before admission.
 // Admit holds one exclusive store lock for the complete membership, capacity,
-// and insertion decision. Recording and gathering are concurrency-safe, but a
-// scrape is not a transaction across independent measurements.
-// The SDK has no tier policy. Workloads inherit label_limit if present; Command.Env may override
-// it. The SDK does not rewrite it from LabelsUsageLimit. Native engines enforce
-// their own configured limits.
+// and insertion decision. Recording and gathering are concurrency-safe.
+// Scrapes provide no transaction across independent measurements.
+// The SDK has no tier policy. Workloads inherit label_limit if present;
+// Command.Env may override it. The SDK never rewrites it from LabelsUsageLimit.
+// Native engines enforce their own configured limits.
 // Native proxying streams by default without parsing, format negotiation,
 // validation, or SDK label admission.
 // MetricsHandler serves directly behind the SDK's GET /metrics authentication,
@@ -167,22 +171,22 @@
 // require MetricsURL and cannot be used with MetricsHandler or registry ingestion.
 // Folding buffers and parses each Prometheus text snapshot (at most
 // MaxNativeMetricsBytes, 16 MiB), validates safe aggregation, and re-encodes the result.
-// Invalid snapshots fail rather than bypassing admission. Admission is stable
-// across scrapes; colliding cumulative counters and histograms are aggregated
-// within each snapshot, not added again across snapshots. The producer must retain
-// cumulative source series for the run. NativeMetricsOverflowLabel defaults to
-// "others"; Replay's engine-owned overflow convention is "_other_".
+// Invalid snapshots fail admission. Admission is stable across scrapes.
+// Colliding cumulative counters and histograms are aggregated within each
+// snapshot. Values from earlier snapshots are never added again. The producer
+// must retain cumulative source series for the run. NativeMetricsOverflowLabel
+// defaults to "others"; Replay's engine-owned overflow convention is "_other_".
 // Replay handles its limits through config.yaml with SDK folding disabled.
 // Its native max_labels=0 setting remains unlimited.
 //
 // With folding enabled, admission survives completion for final scrapes and resets
 // on the next successful workload launch; the producer must still be reachable.
-// This bounds exported request labels, not producer memory, other dimensions, or
-// plan-wide labels across agents. Result-file ingestion and opt-in folding permit
-// N named labels plus one overflow label; zero permits only overflow in these
-// SDK-managed modes. Upload validators return optional preflight counts to the
-// calling control plane without tier or label-limit inputs; those counts do not
-// guarantee runtime cardinality.
+// This bounds exported request labels only. Producer memory, other dimensions,
+// and plan-wide labels across agents remain outside that bound. Result-file
+// ingestion and opt-in folding permit N named labels plus one overflow label.
+// Zero permits only overflow in these SDK-managed modes. Upload validators return
+// optional preflight counts to the calling control plane without tier or
+// label-limit inputs. Runtime cardinality requires separate enforcement.
 //
 // [metrics contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md
 // [request-label validation contract]: https://github.com/reqfleet/engine-sdk/blob/main/agent/metrics.md#request-label-validation

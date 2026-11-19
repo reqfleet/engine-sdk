@@ -1,8 +1,9 @@
 # Shibuya metrics profile: `shibuya-v1`
 
 This document defines the `shibuya-v1` metrics reporting contract for engine
-adapters using `github.com/reqfleet/engine-sdk/agent`: collection modes, metric names, labels, units, and
-histogram boundaries. Adapters declare this profile in their configuration.
+adapters using `github.com/reqfleet/engine-sdk/agent`. It covers collection modes,
+metric names, labels, units, and histogram boundaries. Adapters declare this
+profile in their configuration.
 
 The collector-free [`metricschema`](../metricschema) package owns the Go constants
 for metric names and reserved request labels, ordered label-list functions, and
@@ -17,7 +18,7 @@ collectors and event recording remain in `agent`.
 | SDK recorder updates | Optional `CustomIngestMetrics`; leave `MetricParser`, `MetricsHandler`, and all native options unset | The adapter normalizes samples and records through the SDK-provided `RunContext.Metrics`, which owns request-name validation/admission. The SDK schedules ingestion, samples resources, and serves stored values. |
 | In-process normalized handler | Non-nil `MetricsHandler`, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser`, empty `MetricsURL` | The adapter owns normalization, label limits, and exporter state; the SDK serves the handler directly behind its existing authentication. Folding options are not supported. |
 | Normalized native endpoint | An HTTP(S) `MetricsURL` with a host, `NativeMetricsSchema: agent.MetricsSchemaShibuyaV1`, nil `MetricParser` and `MetricsHandler` | The engine enforces its configured label limit and produces the complete normalized exposition; the runtime streams it without parsing. Set `FoldNativeMetrics: true` only for last-resort SDK folding. |
-| Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. This does **not** imply complete request reporting. |
+| Registry only | All metrics options zero-valued | Exposes the runtime registry without request-event ingestion. Request reporting is incomplete. |
 
 With `CustomIngestMetrics`, `MetricsHandler`, or `MetricsURL`, `ResultFile` may
 name ordinary workload output, such as k6 CSV. The SDK does not tail it or require
@@ -27,7 +28,7 @@ mutually exclusive.
 `FoldNativeMetrics: true` and any nonempty `NativeMetricsOverflowLabel` require
 `MetricsURL`; they are rejected with a handler, result-file events, or registry only.
 For URL-backed metrics, a valid overflow label may be configured with folding
-disabled, but has no effect until folding is enabled.
+disabled. It takes effect only when folding is enabled.
 
 `Run` rejects invalid options before starting background work. Direct use of the
 metrics HTTP handler returns 503 for the same invalid configuration. Validation
@@ -78,23 +79,25 @@ canonical collectors, request-name admission, resource sampling state and
 collection errors. Native handler/URL modes always supply nil and retain their
 existing exporter ownership; clearing SDK registries does not clear native output.
 
-Record through a postlaunch callback's `run.Metrics`; `run.Metrics.Registry()` returns
-its permanently bound `*MetricsRegistry`, which exposes `Gather`, not public
-recording or reset methods. Do not inject a fixed registry or reuse a recorder
-across runs. No collectors use process-global state. Result-file parsers use
-`MetricParser` unchanged and share the run's recorder.
+Record through a postlaunch callback's `run.Metrics`.
+`run.Metrics.Registry()` returns its permanently bound `*MetricsRegistry`.
+The registry exposes `Gather` and has no public recording or reset methods.
+Use the supplied recorder for each run. Fixed registry injection and recorder
+reuse across runs are unsupported. No collectors use process-global state.
+Result-file parsers use `MetricParser` unchanged and share the run's recorder.
 
 #### Run-scoped recorder
 
-Postlaunch production callbacks use the SDK-provided `run.Metrics`; they do not
-construct their own recorder. For standalone use and tests,
+Postlaunch production callbacks use the SDK-provided `run.Metrics`.
+For standalone use and tests,
 `agent.NewMetricsRecorder(run, requestNamesLimit) (*MetricsRecorder, error)`
 creates independent collectors, a fresh per-run request-name store and resource
-sampler. The constructor rejects negative limits, does not read the environment
-or start workers, and copies the assigned identity strings from `run`, not its
-settings, artifacts or workspace. Empty assigned fields remain empty; source
-identity is never a fallback. The budget, identity and registry binding are
-immutable for the recorder's lifetime. Separate recorders have independent state.
+sampler. The constructor rejects negative limits. It reads no environment and
+starts no workers. It copies only the assigned identity strings from `run`;
+settings, artifacts and workspace remain outside the recorder. Empty assigned
+fields remain empty, with no source-identity fallback. The budget, identity and
+registry binding are immutable for the recorder's lifetime.
+Separate recorders have independent state.
 
 Use the named recorder methods for independently available measurements:
 
@@ -116,7 +119,7 @@ NaN, or infinite values before admission or any collector update; measured zero
 is valid. It uses the assigned identity and admits the reserved lowercase
 `metricschema.LLMResponseLabel` (`llm_resp`) through the same first-N request-name
 budget as HTTP, TTFT, status, and request-byte samples. At zero or exhausted
-budget the label becomes `others`, but the observation stays in the wide
+budget the label becomes `others`. The observation stays in the wide
 `shibuya_latency_llm_resp_milliseconds` family. It creates no ordinary latency,
 status outcome, received bytes, or concurrency. Its cumulative observations and
 admission remain available for final scrapes on that run's registry.
@@ -128,26 +131,26 @@ millisecond timings in the ordinary histogram under `metricschema.TTFTLabel`
 `ObserveLLMResponse`, both reject negative, NaN, or infinite values before
 admission, accept measured zero, and create no status, bytes, or concurrency.
 All timing methods share assigned identity, admission and per-run retention.
-They do not infer measurements from HTTP metadata or token counts; omit
-unavailable timings rather than supplying zero. An ordinary HTTP request named
-`llm_resp` still uses the ordinary histogram through `ObserveRequest`,
-`ObserveLatency`, or `RecordSample`.
+Supply measured timings and omit unavailable values.
+HTTP metadata and token counts alone provide no timing measurement.
+An ordinary HTTP request named `llm_resp` uses the ordinary histogram through
+`ObserveRequest`, `ObserveLatency`, or `RecordSample`.
 
 For independent TPS, call `recorder.RecordReceivedToken() error` once per genuinely
 received generated token, including the first. The SDK supplies
 `metricschema.TPSLabel` (`tps`) and status `200`, sharing the timing/request
-admission budget. This records only a successful token-receipt event, not an HTTP
-response, timing, byte, or concurrency sample. The
-[engine-neutral LLM contract](#llm-streaming-metrics) defines token cardinality,
-optional inter-token timing and independent bandwidth reporting.
+admission budget. This records only a successful token-receipt event.
+HTTP responses, timings, bytes, and concurrency require separate measurements.
+The [engine-neutral LLM contract](#llm-streaming-metrics) defines token
+cardinality, optional inter-token timing and independent bandwidth reporting.
 
 `recorder.RecordSample(agent.RequestSample{...})` accepts a `Metric` and explicit
 `HasLatency`, `HasStatus`, `HasReceivedBytes`, and `HasConcurrency` flags. Set only
-the flags for measurements present in that source sample. Zero is a real
-measurement, not an absence marker. Latency uses the ordinary request histogram,
-including for `llm_resp`. Use it for other multi-measurement combinations rather
-than splitting one source sample across independent calls. For latency alone in
-the postlaunch `CustomIngestMetrics` callback:
+the flags for measurements present in that source sample. Zero represents a
+measured value; a false flag marks absence. Latency uses the ordinary request
+histogram, including for `llm_resp`. Use this method for other multi-measurement
+combinations. Keep each source sample in one call. For latency alone in the
+postlaunch `CustomIngestMetrics` callback:
 
 ```go
 err := run.Metrics.ObserveLatency(metric) // milliseconds; identity comes from the assigned run
@@ -165,15 +168,14 @@ method checks), unit conversion, and attribution remain adapter-owned.
 
 For bytes attributed to a request, use `AddReceivedBytes`, or select
 `HasReceivedBytes` when including bytes in a multi-measurement `RecordSample`.
-For independently reported aggregate bytes, use
-`recorder.AddAggregateReceivedBytes(metric)`: it validates label length but
-preserves the aggregate label unchanged, without request admission or fabricated
-requests. Keep these source-specific aggregate labels bounded.
+Use `recorder.AddAggregateReceivedBytes(metric)` for independently reported aggregate bytes.
+It validates label length and preserves the aggregate label.
+It bypasses request admission and creates no request measurements.
+Keep these source-specific aggregate labels bounded.
 `recorder.SetConcurrency(metric)` ignores `Label` and consumes no request slots.
-A concurrency-only `RequestSample` also consumes no slots, but its source request
-label is still validated. Independent measurements remain recordable after a
-different request sample is rejected. CPU/memory collection stays SDK-owned and
-does not use request-name admission.
+A concurrency-only `RequestSample` validates its source label and consumes no slots.
+Independent measurements remain recordable after another request sample is rejected.
+The SDK owns CPU/memory collection, independently of request-name admission.
 
 Each recorder owns a `RequestsNamesStore`. For independent integrations,
 `agent.NewRequestsNamesStore(limit) (*RequestsNamesStore, error)` creates a fresh
@@ -184,40 +186,38 @@ that validation for its callers, so do not pre-admit recorder samples.
 
 `Admit` holds one exclusive store lock for the complete membership, capacity,
 and insertion decision. There is no reset operation.
-The registry needs no recording/reset lock to protect run
-transitions: identity and ownership never change. Collectors and collection-error
-access remain concurrency-safe. Gathering is not a transaction across independent
-measurements or selected families of a sample.
+Immutable run identity and ownership eliminate the need for a registry recording/reset lock.
+Collectors and collection-error access remain concurrency-safe.
+Independent measurements and selected sample families may appear at different points during a gather.
 
-Accepting a new run ID through prepare or start immediately clears previously
-published SDK metrics. Subsequent scrapes return an empty exposition until
-successful process launch creates and publishes the new recorder; readiness is
-not a publication gate. Preparation or launch failure leaves no SDK metrics
-published. Rejected, duplicate and stale triggers do not clear existing output,
-and matching prepare-to-start does not clear it again. Old-run series are never
-merged into the new registry. In-flight scrapes finish gathering their captured
-old registry; they cannot switch to new collectors or identity mid-scrape.
-Clearing publication does not reset detached registries: old recorder references
-remain bound to their original run and cannot update a newer one.
+Accepting a new run ID through prepare or start immediately clears prior SDK metrics.
+Scrapes stay empty until successful launch creates and publishes the new recorder.
+Publication is independent of readiness.
+Preparation or launch failure leaves SDK metrics empty.
+Rejected, duplicate, and stale triggers preserve output.
+Matching prepare-to-start preserves the state established by prepare.
+Each registry contains only its original run.
+In-flight scrapes finish on their captured registry with its original identity.
+Detached registries retain their state and remain bound to that run.
 
 #### Collection callback and registry lifecycle
 
 Use `CustomIngestMetrics func(context.Context, RunContext) error` when the adapter
 must normalize engine output that does not fit `MetricParser`'s complete-request
 event model. For example, k6 CSV emits separate request-duration, received-byte
-and concurrency samples. Read new output, normalize samples, then record
-them through the supplied `run.Metrics`. The SDK owns scheduling, HTTP exposition and CPU/memory
-reporting; the callback must not duplicate those responsibilities.
+and concurrency samples. Read new output, normalize samples, then record them
+through the supplied `run.Metrics`. The SDK exclusively owns scheduling, HTTP
+exposition and CPU/memory reporting.
 
 The SDK invokes this callback after launch and every 250 milliseconds,
 independently of scrapes and the readiness/progress loops.
 Honor its context and synchronize adapter state with `Observe`. An uncanceled
 collection error fails the run and initiates shutdown. Once accepted, that error
 remains a run failure even if the process exits concurrently and final collection
-succeeds. That run's registry also rejects scrapes with HTTP 500 rather than
-serving partial totals. The error remains on that registry; a later successful
-launch publishes fresh state without it. Late callback errors target their own
-run's registry, never whichever run is currently published.
+succeeds. That run's registry also rejects scrapes with HTTP 500, withholding
+partial totals. The error remains on that registry. A later successful launch
+publishes fresh state without it. Late callback errors target only their own
+run's registry.
 
 After process/descendant cleanup, the SDK cancels and joins live callbacks and
 readers, then invokes `CustomIngestMetrics` once more with a fresh
@@ -233,17 +233,18 @@ published, still-recording run; events after completion or for an older run are
 ignored. Result-file tailing records parsed events synchronously before its
 reader terminates, so final draining completes before run cleanup ends.
 
-HTTP dynamically resolves the published registry for each gather: it does not
-read files, sample resources, or invoke callbacks. With no published registry,
-including between acceptance of a new run ID and successful launch, it returns
-an empty exposition; workload readiness belongs to `/progress`, not the metrics
-response status.
+HTTP dynamically resolves the published registry for each gather. Collection
+runs separately; HTTP reads no files, samples no resources, and invokes no
+callbacks. With no published registry, it returns an empty exposition.
+This includes the interval between acceptance of a new run ID and successful
+launch. Use `/progress` to determine workload readiness. Metrics response status
+is independent of readiness.
 
-Adapter event recording uses `recorder.RecordEvent(metric)`, not the former
-process-global `ShibuyaMetric.ToPrometheus()` or direct registry recording APIs.
-JMeter/Locust-style `MetricParser` callbacks and the `ShibuyaMetric` data fields
-remain unchanged. Replay-style native proxying remains separate; a registry
-cannot be shared with another process.
+Use `recorder.RecordEvent(metric)` for adapter event recording.
+It replaces process-global `ShibuyaMetric.ToPrometheus()` and direct registry
+recording APIs. JMeter/Locust-style `MetricParser` callbacks and the
+`ShibuyaMetric` data fields remain unchanged. Replay-style native proxying remains
+separate; a registry cannot be shared with another process.
 
 ### In-process exporter ownership
 
@@ -333,31 +334,31 @@ affect native handlers or URL-backed producers.
 | `shibuya_cpu_gauge` | Gauge | CPU cores consumed | I |
 | `shibuya_mem_gauge` | Gauge | Memory bytes | I |
 
-A classic histogram's sample series are its `_bucket`, `_sum`, and `_count`
-components. The base family name is not itself a sample series. Preserve these
-historical names rather than adding `_total` or changing the byte-counter name.
+A classic histogram emits only `_bucket`, `_sum`, and `_count` sample series.
+Preserve the historical family names exactly, including the byte-counter name
+and absence of a `_total` suffix.
 
 Use lowercase reserved labels `ttft`, `llm_resp`, and `tps` for the optional
 measurements defined in [LLM streaming metrics](#llm-streaming-metrics).
-The runtime routes `llm_resp` complete events into the separate wide histogram
-after admission (its routing comparison is case-insensitive, but reporting
-selectors use the lowercase label). This legacy event routing is unchanged:
-an event folded into `others` uses the ordinary histogram. In contrast,
-`ObserveLLMResponse` explicitly preserves wide-family routing under overflow.
-`ttft` uses the ordinary histogram. Omit unavailable optional LLM observations;
-do not emit a fabricated zero timing. Independent timing methods record only
-their histograms. Complete events also record status, bytes, and concurrency;
-do not manufacture complete events for independently measured timings.
+The runtime routes complete events after admission.
+Case-insensitive `llm_resp` matches use the wide histogram; reporting selectors use lowercase.
+This legacy routing is unchanged: events folded into `others` use the ordinary histogram.
+`ObserveLLMResponse` preserves wide-family routing under overflow.
+`ttft` uses the ordinary histogram.
+Omit unavailable optional LLM observations.
+Independent timing methods record only histograms.
+Complete events also record status, bytes, and concurrency.
+Use independent methods for independently measured timings.
 
 ## LLM streaming metrics
 
 This is the common reporting contract for **every engine adapter** that supplies
 optional LLM measurements, including SDK recorder users, result-file integrations,
 in-process exporters and native endpoints. Engine-specific documentation defines
-how to obtain and select the measurements, not a different meaning for the same
-normalized series. The SDK does not provide a streaming client, tokenizer or
-automatic engine instrumentation. An engine may support only a subset; absent
-measurements MUST remain absent rather than become zero or HTTP-derived estimates.
+how to obtain and select measurements. Their normalized meanings follow this
+contract. The SDK provides no streaming client, tokenizer or automatic engine
+instrumentation. An engine may support only a subset. Absent measurements MUST
+remain absent; fabricated zeros and HTTP-derived estimates are prohibited.
 
 ### Measurements and units
 
@@ -370,25 +371,27 @@ and bounds follow [histogram compatibility](#histogram-compatibility).
 | --- | --- | --- |
 | Time to first token (TTFT) | `shibuya_latency_label_milliseconds`, `label="ttft"` | Milliseconds from sending the generation request until the first nonempty generated-token payload reaches the client; at most one observation per generation |
 | Full response latency | `shibuya_latency_llm_resp_milliseconds`, `label="llm_resp"` | Milliseconds from the same request start until the protocol signals a complete answer; one observation per completed generation |
-| Received-token throughput (TPS) | `shibuya_status_counter`, `label="tps"` | One increment per received generated token, including the first; accumulate token counts, not rates or bytes |
+| Received-token throughput (TPS) | `shibuya_status_counter`, `label="tps"` | One increment per received generated token, including the first; accumulate token counts. Rates and bytes are separate measurements. |
 | Optional inter-token gap | `shibuya_latency_label_milliseconds`, `label="tps"` | Measured milliseconds between successive received tokens within the same generation, beginning with the second token |
 
-TTFT and response latency use the client-observed generation interval, not just
-model execution time. Instrument a monotonic elapsed-time clock where the client
-provides one, and document any clock-resolution limitations. Stream-open events,
-HTTP first bytes, heartbeats, role-only deltas and completion markers are not
-generated tokens. A buffered response cannot recover individual token arrival times.
+TTFT and response latency cover the full client-observed generation interval,
+including time outside model execution. Instrument a monotonic elapsed-time
+clock where the client provides one. Document any clock-resolution limitations.
+Stream-open events, HTTP first bytes, heartbeats, role-only deltas and completion
+markers are not generated tokens. A buffered response cannot recover individual
+token arrival times.
 Do not substitute HTTP waiting time for TTFT or HTTP duration for an unmeasured
 LLM completion. Non-streaming clients may report measured full response latency
 without reporting TTFT or inter-token gaps.
 
 Each stream has its own previous-token timestamp. The first token contributes
-one TPS increment independently of whether TTFT is recorded, but no inter-token
-gap. Never span separate generations or treat a completion marker as another
-token. Convert measured durations to milliseconds before recording. Timings are
-individual observations, not running totals, precomputed percentiles or average
-durations. Inter-token gaps are optional: they are neither required for TPS nor
-the denominator of the current chart.
+one TPS increment independently of whether TTFT is recorded. Inter-token gaps
+start with the second token. Never span separate generations or treat a
+completion marker as another token. Convert measured durations to milliseconds
+before recording. Record individual timing observations. Running totals,
+precomputed percentiles and average durations are unsuitable timing inputs.
+Inter-token gaps are optional. TPS requires no gaps, and the current chart uses
+a separate denominator.
 
 For the selected identity filters, the existing TPS chart uses
 `sum(rate(shibuya_status_counter{label="tps",...}[5s]))`: received tokens per
@@ -401,12 +404,12 @@ SSE framing, a WebSocket message, or a nonempty content chunk does not establish
 model-token cardinality. An endpoint that guarantees one generated token per
 event permits one increment per content event. A batched event requires a known
 token count or individual token observations; expand a known count into one
-recorder call per token. Without that evidence, do not claim model-token TPS.
-Do not estimate token counts from characters or bytes, assume every chunk is one
-token, or invent arrival times for tokens within a batch. Empty content,
-heartbeats, role-only deltas, `[DONE]` and other completion/control messages do
-not count. Completion usage totals are not receipt events: do not replay them as
-tokens at completion or add them after already counting the received tokens.
+recorder call per token. Report model-token TPS only with that evidence.
+Character counts, byte counts and chunk boundaries cannot establish token counts.
+Use observed arrival times; never invent arrival times for tokens within a batch.
+Exclude empty content, heartbeats, role-only deltas, `[DONE]` and other
+completion/control messages. Completion usage totals describe aggregate usage.
+Do not replay them as receipt events or add them after counting received tokens.
 
 Bandwidth remains independent in `shibuya_egress_bytes_counter`, in bytes.
 Enabling TPS MUST NOT disable or replace an engine's selected native aggregate
@@ -438,31 +441,32 @@ For example, each genuine token observation records only:
 err := recorder.RecordReceivedToken()
 ```
 
-`200` is the normalized successful token-event outcome, not a fabricated
-per-token HTTP response. Existing error reporting classifies non-2xx/non-3xx
-statuses as errors, so a textual receipt status such as `received` would
-incorrectly classify tokens as failures. The recorder supplies run identity and
-shared admission. Legacy adapters may use their own success status; the TPS
-chart does not require exact status-key uniformity.
+`200` denotes a successful token event. HTTP responses require separate
+observations. Existing error reporting classifies non-2xx/non-3xx statuses as
+errors. A textual receipt status such as `received` would incorrectly classify
+tokens as failures. The recorder supplies run identity and shared admission.
+Legacy adapters may use their own success status. The TPS chart does not require
+exact status-key uniformity.
 For a source sample that genuinely contains both a token receipt and a measured
 gap, `RecordSample` may select only `HasStatus` and `HasLatency`. Neither a token
 count nor an independent timing creates received bytes or updates concurrency.
-Never manufacture a complete `ShibuyaMetric` event merely to transport an
-independent measurement. Record request/generation success or failure separately,
-once per reported attempt under its request/generation label, preserving the
-actual classification. An error marker is not a token, even after some tokens
-have been received.
+Use independent recorder methods for independent measurements.
+Record request/generation outcomes separately, once per reported attempt.
+Preserve the request/generation label and actual classification.
+Exclude error markers from token counts, including after partial token receipt.
 
-Native producers emit equivalent cumulative token counts directly, not current
-rates, batch sizes or a count of scrapes. Preserve a genuine cumulative
-received-token source as a cumulative counter; never add its whole value again
-on each scrape or pass it through `RecordReceivedToken` as though it were one token.
+Native producers emit cumulative token counts directly. Current rates, batch
+sizes and scrape counts cannot substitute for cumulative token counts.
+Preserve a genuine cumulative received-token source as a cumulative counter.
+Never add its whole value again on each scrape or pass it through
+`RecordReceivedToken` as though it were one token.
 Receipt samples instead contribute exactly one increment each. A completion-only
 total cannot establish live received-token throughput.
 
 Validate finite, nonnegative timing and byte observations at ingestion; measured
-zero is valid for those measurements. A token-receipt sample represents exactly
-one token, not a zero, byte value, cumulative total or precomputed rate.
+zero is valid for those measurements. Each token-receipt sample represents
+exactly one token. Zero, byte values, cumulative totals and precomputed rates
+are invalid token-receipt samples.
 If a generation fails before its first token, omit TTFT. If it fails or is
 interrupted before completion, omit the unavailable full response duration.
 Retain already measured TTFT, token counts, bytes and inter-token gaps; do not
@@ -487,18 +491,18 @@ The SDK's `metricschema` package owns the shared instrumentation source names:
 `LLMInterTokenDurationMetric` (`llm_inter_token_duration`). Adapters using these
 sources import the constants directly, without local definitions or aliases.
 The timing sources supply milliseconds; token points each represent one received
-generated token. These are source names, not normalized Prometheus family names
-or request labels. They do not enable ingestion or instrument an engine by
-themselves; source selection and native-output parsing remain adapter-owned.
+generated token. These names identify instrumentation sources. Normalized
+Prometheus families and request labels have separate names. Source selection,
+native-output parsing and engine instrumentation remain adapter-owned.
 
 Each adapter MUST document its native source fields, units/conversions, selectors,
 protocol completion, generated-token detection and cardinality evidence,
 independent byte-source boundaries/exclusions and unsupported measurements.
 These choices may differ across k6, Locust, JMeter, Replay and other engines;
-the normalized meanings above do not. Custom counters require genuine client
-instrumentation; selecting a metric does not add streaming support to stock k6
-or any other engine. The recorder methods encode reporting semantics, not
-streaming support.
+the normalized meanings above are fixed. Custom counters require genuine client
+instrumentation. Selecting a metric leaves streaming support in stock k6 or any
+other engine unchanged. The recorder methods encode reporting semantics.
+Streaming support requires engine instrumentation.
 Verify representative successful and failed/interrupted streams, multibyte payloads,
 first-token accounting, batched events, excluded controls/failure markers, missing
 observations, independent nonoverlapping bytes, no synthetic request outcomes,
@@ -518,9 +522,9 @@ timing metric, protocol negotiation or automatic conformance enforcement.
 ## Request-label validation
 
 Request labels must contain at most `metricschema.MaxRequestLabelBytes`
-(255 bytes, not characters). Use `agent.ShibuyaMetric.LabelIsValid()` to check
-the byte length; adapter-specific requirements, such as a nonempty URL, remain
-separate.
+(255 bytes). Count bytes independently of character count.
+Use `agent.ShibuyaMetric.LabelIsValid()` to check the byte length.
+Adapter-specific requirements, such as a nonempty URL, remain separate.
 
 Validate the source request label **before admission or metric accumulation**.
 Do not truncate oversized labels, merge them into shorter prefixes, or send them
@@ -544,26 +548,27 @@ Rejection scope depends on the integration:
   reported samples, such as aggregate received bytes or live concurrency, remain
   independent; do not discard them because another request sample was rejected.
 
-These are metrics-reporting rules, not limits on workload HTTP URLs or permission
-to execute requests. Rejecting a metric event does not cancel or fail the workload.
+These rules govern metrics reporting. Workload HTTP URLs and request-execution
+permissions remain unchanged. Rejecting a metric event leaves the workload running
+and does not fail it.
 
-When upgrading from the previous 1023-byte maximum, choose bounded request/group
-names in the adapter's source mapping for longer URLs. SDK-managed ingestion now
-rejects labels of 256–1023 bytes that earlier versions accepted. Existing engine
-images retain their deployed behavior; coordinators must remain compatible with
-those engines rather than requiring an upgrade.
+When upgrading from the 1023-byte maximum, map longer URLs to bounded request/group names.
+SDK-managed ingestion now rejects labels of 256–1023 bytes that earlier versions accepted.
+Existing images retain their deployed behavior.
+Coordinators must preserve compatibility with those images without requiring engine upgrades.
 
 ## Request-name budget
 
 A **request name** identifies a request or request group, typically by URL or a
 custom grouping name. It is emitted as the value of the Prometheus `label`
-dimension; it is not a metric-family name or an arbitrary Prometheus label key.
-The Go admission API uses request-name terminology without changing that wire key.
+dimension. Metric-family names and Prometheus label keys are separate concepts.
+The Go admission API uses request-name terminology while preserving that wire key.
 
-Runtime admission is configured by the nonnegative
-`AgentServerOptions.LabelsUsageLimit`, not by coordinator run messages or the
-upload-preflight callback. `NewAgentServer` uses that option directly, including
-zero; `LoadAgentServerOptions` and `MakeAgentServer` resolve it from the lowercase
+Configure runtime admission with the nonnegative
+`AgentServerOptions.LabelsUsageLimit`. Coordinator run messages and the
+upload-preflight callback have no effect on this budget.
+`NewAgentServer` uses that option directly, including zero.
+`LoadAgentServerOptions` and `MakeAgentServer` resolve it from the lowercase
 `label_limit` environment variable (`metricschema.DefaultLabelLimit`, **10**,
 when unset or empty). This default counts request names only, excluding overflow.
 Adapters can use the loader's resolved budget to initialize native exporters,
@@ -602,39 +607,41 @@ The helper does not validate samples or aggregate metrics. Native snapshot
 consumers must also preserve all-or-nothing admission on rejected scrapes;
 the SDK rolls back tentative new admissions if folding fails.
 
-Replay uses `metrics.max_labels` from its prepared `config.yaml`. Run preparation
-preserves that value rather than rewriting it from `label_limit`; no extra command
-environment override is added. SDK folding stays disabled for Replay. Positive
-budgets use its native limiter and `_other_` overflow; native `max_labels: 0` means
-unlimited. Replay's own configuration and environment precedence remains unchanged.
+Replay uses `metrics.max_labels` from prepared `config.yaml`.
+Preparation preserves that value and leaves the command environment unchanged.
+`label_limit` has no effect on it. SDK folding stays disabled.
+Positive budgets use Replay's native limiter and `_other_` overflow.
+Native `max_labels: 0` means unlimited.
+Replay's configuration and environment precedence remain unchanged.
 
-This is not a global plan-wide budget across agents. SDK folding does not cap
-producer memory, source-side series, metric-family names, statuses, or other
-Prometheus dimensions. Separately, the upload validator returns an optional
-preflight count to the calling control plane; no tier or numeric label-limit value
-is passed into that callback. The control plane applies its upload policy to the
-returned count. These counts provide early feedback only; they do not predict or
-bound the labels that runtime code will emit.
+The budget applies per agent/run. Plan-wide labels across agents remain
+unbounded by it. SDK folding leaves producer memory, source-side series,
+metric-family names, statuses, and other Prometheus dimensions uncapped.
+The upload validator separately returns an optional preflight count to the
+calling control plane. That callback receives no tier or numeric label-limit
+input. The control plane applies its upload policy to the returned count.
+Preflight counts provide early feedback only. Runtime label emission requires
+separate accounting and enforcement.
 
 Result-file ingestion and the recorder admit names in store admission order and
-fold excess names into `others`. With native folding enabled, the SDK sorts new names within each successful
-scrape before filling remaining slots. Once admitted, a name retains its slot
-for that run, even if it disappears from later scrapes. Rotating names cannot
-reclaim slots. All native request-labelled families use the same mapping, and a
-rejected scrape consumes no admission slots.
+fold excess names into `others`. With native folding enabled, the SDK sorts new
+names within each successful scrape before filling remaining slots.
+Once admitted, a name retains its slot for that run, even if it disappears from
+later scrapes. Rotating names cannot reclaim slots. All native request-labelled
+families use the same mapping. A rejected scrape consumes no admission slots.
 
 For opt-in folding, `AgentServerOptions.NativeMetricsOverflowLabel` defaults to
-`others`; use `_other_` for Replay's convention. These are the only supported values. Only the
-configured overflow name is exempt from the request-name budget; the other
-spelling is an ordinary name. Collisions with an existing overflow series are
-aggregated, not emitted as duplicate series.
+`others`; use `_other_` for Replay's convention. These are the only supported
+values. Only the configured overflow name is exempt from the request-name budget;
+the other spelling is an ordinary name. Collisions are aggregated into the
+existing overflow series, preserving series uniqueness.
 
 Native folding sums the **current cumulative snapshot** of counters and
 histograms for series that become identical after replacing `label`, preserving
 all other label dimensions, including status groups. It sums bytes, histogram
-counts, sums, and corresponding cumulative buckets; it never adds a previous
-scrape's values again. The SDK retains admitted names, not a history of
-overflow-source names or values.
+counts, sums, and corresponding cumulative buckets. Each scrape is aggregated
+independently; previous scrape values are never added again. The SDK retains
+admitted names only. Overflow-source names and values have no retained history.
 
 
 ## Histogram compatibility
@@ -648,7 +655,7 @@ another caller's bounds or future calls.
 Pass these bounds directly to Prometheus histogram constructors, which add the
 implicit `+Inf` bucket. Exposition validators must append `math.Inf(1)` to check
 the complete wire profile. Obtain bounds once when constructing a collector or
-validator, not per recorded sample. Do not reconstruct them from
+validator. Reuse them for recorded samples. Do not reconstruct them from
 `prometheus.DefBuckets`; the profiles below are the fixed reporting contract.
 
 Every ordinary histogram must expose exactly these cumulative upper bounds in
@@ -658,12 +665,10 @@ milliseconds, shared by JMeter, Locust, Replay, and normalized native adapters:
 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, +Inf
 ```
 
-Ordinary aggregate quantiles sum all buckets by `le` before applying
-`histogram_quantile`; there is no bucket-boundary filter. The 1 and 2.5 ms buckets
-participate in aggregate percentiles rather than being discarded. Integer
-exposition labels (`1`) and Prometheus's normalized float labels (`1.0`)
-represent the same numeric boundary. The mean remains exact and count-weighted
-because it uses `_sum` divided by `_count`.
+Ordinary aggregate quantiles sum every bucket by `le` before `histogram_quantile`,
+including the 1 and 2.5 ms buckets.
+Integer labels (`1`) and normalized float labels (`1.0`) identify the same boundary.
+The mean remains exact and count-weighted: `_sum` divided by `_count`.
 
 Aggregate percentiles require consistent bucket boundaries across all contributing
 producers and stored samples. Normalize additional or missing boundaries in the
@@ -748,14 +753,15 @@ from `github.com/reqfleet/engine-sdk/resources`. Sampling policy is separate fro
   cgroup-accounted memory in **bytes**, including cache. It is not process RSS or
   the configured memory limit.
 
-These are container/cgroup measurements, including the SDK and engine processes
-sharing the cgroup, not per-PID measurements. The readers require readable Linux
-cgroup files at the conventional container mount paths under `/sys/fs/cgroup`;
-they do not discover host-side paths or nested process membership. See the
+These measurements cover the entire container/cgroup, including the SDK and
+engine processes sharing it. Per-PID measurements require a separate source.
+The readers require readable Linux cgroup files at the conventional container
+mount paths under `/sys/fs/cgroup`. Host-side path discovery and nested process
+membership discovery are unsupported. See the
 [package documentation](../containerstats/cgroup.go) for the exact v1/v2 paths.
-Calls are synchronous and safe to make concurrently, including alongside the SDK
-runtime. They start no workers, register no collectors, and require no coordinator.
-Missing, unreadable, or malformed files return errors, not successful zero samples.
+Calls are synchronous and concurrency-safe, including alongside the SDK runtime.
+They start no workers, register no collectors, and require no coordinator.
+Missing, unreadable, or malformed files return errors. Treat those reads as failed.
 
 Use a zero-valued `resources.Sampler` and call `Sample()` to obtain
 `(resources.Sample, error)`. A sample contains only CPU cores and memory bytes;
@@ -774,8 +780,8 @@ these rules:
 - Sampling stops at the first read error, which identifies the resource and wraps
   the underlying error. Read failures return a zero `Sample` and leave the CPU
   baseline unchanged. Callers must discard the entire sample without publishing
-  it. The next complete sample spans from the last successful baseline, not the
-  failed attempt.
+  it. The next complete sample spans from the last successful baseline across
+  the failed attempt.
 - A nil error means both `CPUCores` and `MemoryBytes` are reportable, including
   genuine zero usage.
 - Standalone exporters reusing a sampler call `Reset()` at each run boundary
@@ -783,11 +789,12 @@ these rules:
   resource sampler for each run; recorder adapters do not manage it.
 
 `errors.Is(err, resources.ErrSampleUnavailable)` identifies an expected baseline
-attempt, not a zero-usage measurement. Omit both resource series, including
-previous values after a counter decrease, without logging a warning. Do not
-present stale values as a new sample. Always check the error before updating
-gauges. Other sampling errors log a warning and skip the update; last-good
-values remain unchanged. They do not fail scrapes or terminate the workload.
+attempt. Usage measurements are unavailable for that attempt.
+Omit both resource series, including previous values after a counter decrease,
+without logging a warning. Do not present stale values as a new sample.
+Always check the error before updating gauges. Other sampling errors log a
+warning and skip the update; last-good values remain unchanged.
+They do not fail scrapes or terminate the workload.
 The next sampling attempt can recover using the last successful baseline.
 
 `Sample` and `Reset` are synchronized; do not copy a sampler after first use.
@@ -812,13 +819,13 @@ active_users}` once per completed request. Define the entire mapping:
 | `received_bytes` → `shibuya_egress_bytes_counter` via `EgressBytes` | Counter increment in bytes, no scaling | I + `label` |
 | `active_users` → `shibuya_threads_gauge` via `Threads` | Gauge in concurrent users, no scaling | I |
 
-The parser returns an error for unsupported or incomplete events rather than
-inventing status, timing, or byte values. The registry owns cumulative totals,
-the shared ordinary bucket profile, and run separation. Optional LLM events are
-omitted unless the source measures them; an explicit `llm_resp` observation is in
-ms and routes to the wide profile. CPU and memory are supplied separately by the
-runtime's resource collector. Never feed a cumulative snapshot into this event
-parser as if it were one request.
+Unsupported or incomplete events return parser errors.
+Record only source-measured status, timing, and bytes.
+The registry owns cumulative totals, ordinary buckets, and run separation.
+Optional LLM events require measured values.
+Explicit `llm_resp` observations use milliseconds and the wide profile.
+The runtime's resource collector supplies CPU and memory separately.
+Feed only per-request events to this parser.
 
 ### Native seconds histogram
 
@@ -837,15 +844,15 @@ An adapter can expose a normalized endpoint for a source classic histogram
 | CPU-time delta / wall-time delta → `shibuya_cpu_gauge` | Both deltas in seconds; result in CPU cores | I |
 | Source memory gauge → `shibuya_mem_gauge` | Convert source units to bytes, e.g. KiB × 1024 | I |
 
-The source/adapter owns accumulation and resets for each engine/run, and must
-switch identity for a new run. A scrape with sum `0.25` seconds and count `1`
-becomes sum `250` ms and count `1`; a second scrape without new events stays the
-same. Omit unavailable optional LLM metrics. Required ordinary histogram bounds
-must all exist after conversion; converting seconds does not manufacture missing
-boundaries. Optional LLM histograms require their own wide profile. Missing
-required reporting values prevent a claim of complete request reporting. If the
-source lacks the histogram information, use per-request result events instead of
-renaming coarse buckets, summaries, or percentiles.
+The source/adapter owns accumulation, resets, and identity changes for each run.
+A snapshot with sum `0.25` seconds and count `1` becomes sum `250` ms and count `1`.
+Repeated scrapes preserve those values until new events arrive.
+Omit unavailable optional LLM metrics.
+Preserve every required ordinary histogram boundary during unit conversion.
+Optional LLM histograms use their own wide profile.
+Complete request reporting requires all mandatory measurements.
+If the source lacks the required histogram data, use per-request result events.
+Coarse buckets, summaries, and percentiles cannot reconstruct missing boundaries.
 
 ## Implementation references
 
@@ -860,5 +867,5 @@ renaming coarse buckets, summaries, or percentiles.
 The SDK Go API release, this metrics profile, and the coordinator wire protocol
 are distinct contracts. The existing wire envelope/subscription is unversioned;
 it has no protocol-version negotiation or unsupported-version rejection.
-Control-plane catalog, PromQL, summary queries, and built-in adapter parsers remain
-owned by Shibuya, not the public SDK.
+Shibuya owns control-plane catalog, PromQL, summary queries, and built-in adapter
+parsers. These remain outside the public SDK.
