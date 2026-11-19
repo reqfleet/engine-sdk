@@ -1,29 +1,27 @@
 # Public adapter-owned plan preparation
 
-This independent module demonstrates a real curl adapter using only the public
-[`engine-sdk` v0.1.1](https://github.com/reqfleet/engine-sdk/tree/v0.1.1)
-`agent` and `protocol` APIs. It has no Shibuya dependency, SDK internal imports,
-workspace requirement, or `replace` directives. Test assertions use public
-`testify`. It demonstrates adapter preparation and the SDK-owned lifecycle, not
-standalone authorization, production engine registration, or a new production
-engine.
+This independent module demonstrates curl preparation and the SDK-owned lifecycle.
+It uses only public [`engine-sdk` v0.1.1](https://github.com/reqfleet/engine-sdk/tree/v0.1.1)
+`agent` and `protocol` APIs, plus `testify` for assertions.
+It builds independently of Shibuya, SDK internals, workspaces, and `replace` directives.
+The coordinator authorizes execution. Production engine registration remains
+separate control-plane work.
 
 ## Preparation contract
 
-The SDK resolves the assigned run settings, initializes its run-local workspace,
-stages the original artifacts, and completes any dependency preparation before
-calling `BeforeStart`. Only after that hook succeeds does it call `BuildCommand`
-and launch the workload. The adapter sets `TestFileName: "original.curl"` and
-intentionally does not set `ConfFileName`: the coordinator supplies an original
-artifact, not a generated curl configuration.
+The SDK resolves assigned settings, initializes the workspace, and stages original
+artifacts. It completes dependency preparation before calling `BeforeStart`.
+After that hook succeeds, it calls `BuildCommand` and launches the workload.
+Set `TestFileName: "original.curl"` and leave `ConfFileName` unset.
+The coordinator supplies the original artifact; the adapter generates curl configuration.
 
-`beforeStart` requires a JSON object containing positive integer strings for
-`concurrency` and `duration`. Duration is in minutes and is checked for overflow
-before conversion to seconds. `plan_name` is an optional string; absent means an
-empty name. Null values and other types for these recognized fields are rejected.
-Unknown fields are ignored, including `rampup`: curl has no ramp-up mapping in
-this example. Assignments are already per-agent counts; the adapter does not
-allocate or divide them.
+`beforeStart` requires a JSON object with positive integer strings for
+`concurrency` and `duration`. Duration uses minutes.
+Conversion to seconds checks for overflow.
+The optional string `plan_name` defaults to empty.
+Null and other types are rejected for these fields.
+Unknown fields, including `rampup`, are ignored.
+Use the assigned per-agent counts unchanged. This example supports a fixed concurrency.
 
 Only one curl operation is supported. Preparation rejects `next`, `--next`,
 `-:`, their accepted abbreviations and bundled short-option forms. It also
@@ -44,36 +42,35 @@ max-time = <duration minutes multiplied by 60>
 header = "X-Plan-Name: <assigned plan name>"
 ```
 
-The scalar options come last, so assigned concurrency and timeout replace the
-fixture's conflicting `parallel-max = 1` and `max-time = 5`. curl's `max-time` is
-a per-transfer timeout, not a scheduler that repeats this finite three-request
-workload for the full duration. The header uses curl configuration quoting, not
-shell or Go quoting: quotes and backslashes are escaped and Unicode is preserved.
-CR, LF, and NUL are rejected in the name to prevent header injection. Other
-uploaded options remain native curl options; header options are additive.
-`parallel-max` is an upper bound, not a promise that every transfer starts
-simultaneously. The cancellation scenario waits for a real in-flight request,
-then verifies that every admitted request ends and no queued work leaks into
+Scalar options come last. Assigned concurrency and timeout replace the fixture's
+`parallel-max = 1` and `max-time = 5`.
+Curl's `max-time` limits each transfer.
+The finite three-request workload runs once.
+Quote headers using curl configuration syntax: escape quotes and backslashes,
+and preserve Unicode. Reject CR, LF, and NUL in names to prevent header injection.
+Other uploaded options retain native curl behavior; header options are additive.
+
+`parallel-max` caps concurrent transfers; their start times may differ.
+The cancellation scenario waits for a real in-flight request.
+It then verifies that every admitted request ends and queued work stays out of
 the recovery run.
 
-Preparation checks cancellation before work, during the streaming copy, and
-before/after publication. Validation, copy, write, close, and rename failures
-propagate as startup errors. The file is closed before atomic rename to
-`Workspace.Temp/prepared.curl`; failed/canceled preparation removes its generated
-output. The original `run.TestFile` is never rewritten. `buildCommand` returns
-`curl --disable --config <prepared path>`; the SDK owns launching, stopping,
-and reaping curl, rather than the hook starting a subprocess itself.
+Preparation checks cancellation before work, during copying, and before and after publication.
+Validation, copy, write, close, and rename failures become startup errors.
+Close the file before atomically renaming it to `Workspace.Temp/prepared.curl`.
+Failed or canceled preparation removes generated output and preserves `run.TestFile`.
+`buildCommand` returns `curl --disable --config <prepared path>`.
+The SDK launches, stops, and reaps curl.
 
-Inputs, temporary files, and results are reset at the next run initialization.
-A completed run's generated file remains available until that reset; it is not
-promised permanent retention or an empty temp directory on completion.
-`Workspace.Config` and `Workspace.State` are reusable locations and are not used
-for generated plans. In SDK v0.1.1 inputs live at `/test-data` independently of
-`AGENT_ROOT`; temp and results live under the selected agent root. Preparation
-failure is reported through run-scoped status as failed/startup with exit code
-`-1`; cancellation prevents launch or stops the running process. A coordinator
-start request can succeed before asynchronous preparation fails, so callers must
-observe run status.
+Inputs, temporary files, and results reset at the next run initialization.
+Generated files remain available until that reset.
+Keep generated plans in temporary storage; `Workspace.Config` and
+`Workspace.State` hold reusable state.
+In SDK v0.1.1, inputs live at `/test-data`.
+Temp and results live under `AGENT_ROOT`.
+Preparation failure reports failed/startup with exit code `-1`.
+Cancellation prevents launch or stops the running process.
+Observe run status after a start request: asynchronous preparation can still fail.
 
 ## Build and dependency boundary
 
@@ -90,13 +87,11 @@ docker build -t engine-sdk-preparing-adapter:local .
 docker run --rm --network bridge engine-sdk-preparing-adapter:local
 ```
 
-This is a separate Go module pinned to the released SDK, not to the parent
-checkout. Root-level `go test ./...` does not include this module. No local
-`replace` or workspace is needed.
+This separate Go module pins the released SDK and builds independently of the
+parent checkout. Run its tests separately from root-level `go test ./...`.
 
-With the Go version declared in the repository root's [go.mod](../../go.mod),
-Make, and a running Docker daemon, run both the SDK race tests and this Docker
-conformance harness from the repository root:
+To run SDK race tests and this Docker harness together, use the repository root.
+Install the Go version in [go.mod](../../go.mod), Make, and a running Docker daemon:
 
 ```sh
 make test
@@ -108,13 +103,18 @@ runs the same `make test` target on pull requests.
 
 ## Real runtime conformance
 
-Run the integration test only in the disposable container: it uses root to bind
-its ephemeral-CA HTTPS artifact server to `127.0.0.1:443`, a TLS command peer on
-`:2416`, the SDK HTTP server on `:8080`, and an actual HTTP workload target on
-`:18080`. Do not publish ports or mount host directories. The image runs the
-preparation unit tests, then builds the adapter and integration-tagged test
-binary with `CGO_ENABLED=0`. It installs curl and CA certificates
-in a Debian runtime. Its exact entrypoint is:
+Run integration tests only in a disposable container with private ports and storage.
+The root test harness binds these services:
+
+- Ephemeral-CA HTTPS artifact server: `127.0.0.1:443`.
+- TLS command peer: `:2416`.
+- SDK HTTP server: `:8080`.
+- HTTP workload target: `:18080`.
+
+The image runs preparation unit tests.
+It builds the adapter and integration-tagged test binary with `CGO_ENABLED=0`,
+then installs curl and CA certificates in Debian.
+Its entrypoint is:
 
 ```sh
 /usr/local/bin/conformance.test -test.run='^TestPublicAdapterRuntime$' \
@@ -123,18 +123,20 @@ in a Debian runtime. Its exact entrypoint is:
 
 The harness starts `/usr/local/bin/preparing-adapter` once with a test-owned
 `AGENT_ROOT`, generated coordinator CA PEM, API key, and public engine metadata.
-It communicates over the real TLS subscription using public `protocol.Topic`
-and `protocol.Payload`, serves authenticated artifacts at public protocol paths,
-and observes authenticated run status and actual target requests. It does not
-mock or replace SDK lifecycle methods.
+It uses the real TLS subscription with public `protocol.Topic` and `protocol.Payload`.
+It serves authenticated artifacts at public protocol paths and observes
+authenticated run status and real target requests.
 
-The same child covers a successful three-URL run with concurrency `13`, duplicate
-start suppression, a second run with changed name/concurrency `3`, invalid
-settings, cancellation while artifact download is blocked, cancellation while
-curl is in flight, rejection of multiple operations before any workload launch,
-and recovery. It also checks that operation names in native header values are
-preserved and an ambient `.curlrc` cannot add requests. Rejected preparation
-leaves the original artifact unchanged and no temporary or published config.
-Assertions compare generated assignments, request names/counts, and terminal
-SDK statuses. The five-component engine name and offset `7` select the
-assignment at `runs["7"]`; no engine-specific coordinator transformation is needed.
+The same child covers:
+
+- A successful three-URL run with concurrency `13` and duplicate-start suppression.
+- A second run with a changed name and concurrency `3`.
+- Invalid settings and cancellation during artifact download or curl execution.
+- Rejection of multiple operations before launch, followed by recovery.
+- Preservation of operation names in native header values.
+- Isolation from ambient `.curlrc` settings.
+
+Rejected preparation preserves the original artifact and removes temporary and
+published config. Assertions compare assignments, request names/counts, and terminal
+SDK statuses. The five-component engine name and offset `7` select `runs["7"]`.
+The coordinator delivers that assignment directly.
