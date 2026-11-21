@@ -445,6 +445,13 @@ The coordinator consumes preparation/run status.
 The Reqfleet collector consumes `/metrics`.
 Callbacks supply observations and metric data; the SDK serves and authenticates requests.
 
+The runtime uses `github.com/reqfleet/toolkit/lib/http/route` for route registration,
+`http/auth` for bearer authentication, and `http/client` for its three-second
+coordinator client. The SDK retains coordinator TLS configuration, endpoint
+handlers, metrics proxying, and listener/lifecycle ownership. Missing or malformed
+bearer credentials still return 400; mismatched tokens return 403. Only the exact
+`/healthz` path bypasses authentication. Request logging is not enabled implicitly.
+
 ## Verification and completion
 
 Run the SDK checks from the repository root:

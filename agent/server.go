@@ -24,6 +24,7 @@ import (
 	"github.com/reqfleet/engine-sdk/internal/pubsub"
 	"github.com/reqfleet/engine-sdk/metricschema"
 	"github.com/reqfleet/engine-sdk/protocol"
+	httpclient "github.com/reqfleet/toolkit/lib/http/client"
 )
 
 const (
@@ -120,7 +121,7 @@ func NewAgentServer(opts AgentServerOptions) *AgentServer {
 	if opts.StopTimeout <= 0 {
 		opts.StopTimeout = DefaultStopTimeout
 	}
-	httpClient := &http.Client{Timeout: 3 * time.Second}
+	httpClient := httpclient.MakeClientWithShortTimeout()
 	httpClient.Transport = &http.Transport{
 		TLSClientConfig: &tls.Config{
 			RootCAs:    opts.CoordinatorRootCAs,
