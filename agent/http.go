@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	httpauth "github.com/reqfleet/toolkit/lib/http/auth"
+	httproute "github.com/reqfleet/toolkit/lib/http/route"
 )
 
 func (as *AgentServer) metricsHandler() http.Handler {
@@ -49,38 +50,20 @@ func (as *AgentServer) metricsHandler() http.Handler {
 
 // Handler returns the authenticated agent HTTP endpoints. Health checks bypass authentication.
 func (as *AgentServer) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /progress", as.handleProcessCheck)
-	mux.HandleFunc("GET /prepare-progress", as.handlePreparationCheck)
-	mux.Handle("GET /metrics", as.metricsHandler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if as.isSubscribed() {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		http.Error(w, "not subscribed to coordinator", http.StatusServiceUnavailable)
+	router := httproute.NewRouter("agent", "")
+	router.AddRoutes(httproute.Routes{
+		{Name: "progress", Method: http.MethodGet, Path: "/progress", HandlerFunc: as.handleProcessCheck},
+		{Name: "prepare-progress", Method: http.MethodGet, Path: "/prepare-progress", HandlerFunc: as.handlePreparationCheck},
+		{Name: "metrics", Method: http.MethodGet, Path: "/metrics", HandlerFunc: as.metricsHandler().ServeHTTP},
+		{Name: "healthz", Method: http.MethodGet, Path: "/healthz", HandlerFunc: func(w http.ResponseWriter, _ *http.Request) {
+			if as.isSubscribed() {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			http.Error(w, "not subscribed to coordinator", http.StatusServiceUnavailable)
+		}},
 	})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
-			mux.ServeHTTP(w, r)
-			return
-		}
-		bearer := r.Header.Get("Authorization")
-		if bearer == "" {
-			http.Error(w, "bearer header is empty", http.StatusBadRequest)
-			return
-		}
-		token := strings.Split(bearer, " ")
-		if len(token) != 2 || token[0] != "Bearer" {
-			http.Error(w, "token is invalid", http.StatusBadRequest)
-			return
-		}
-		if token[1] != as.options.EngineMeta.APIKey {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	return httpauth.AuthRequiredWithToken(router.Mux(), as.options.EngineMeta.APIKey)
 }
 
 func (as *AgentServer) startHTTPServer() error {
