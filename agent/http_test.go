@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/reqfleet/engine-sdk/protocol"
+	httpserver "github.com/reqfleet/lib/http/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -231,6 +233,150 @@ func TestHandlerAuthentication(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+
+	as.updateSubStatus(true)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	assert.Equal(t, http.StatusOK, response.Code)
+
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/healthz/", nil),
+		httptest.NewRequest(http.MethodPost, "/healthz", nil),
+	} {
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		assert.Equal(t, http.StatusBadRequest, response.Code, "%s %s must require auth", req.Method, req.URL.Path)
+	}
+}
+
+func TestHandlerEmptyAPIKeyDeniesProtectedRoutes(t *testing.T) {
+	calls := 0
+	as := NewAgentServer(AgentServerOptions{
+		NativeMetricsSchema: MetricsSchemaShibuyaV1,
+		MetricsHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusOK)
+		}),
+	})
+	as.updateSubStatus(true)
+	handler := as.Handler()
+	for _, endpoint := range []string{"/progress", "/prepare-progress", "/metrics"} {
+		for _, authHeader := range []string{"", "Bearer ", "Bearer secret"} {
+			request := httptest.NewRequest(http.MethodGet, endpoint, nil)
+			request.Header.Set("Authorization", authHeader)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			assert.Equal(t, http.StatusUnauthorized, response.Code, "%s with %q", endpoint, authHeader)
+		}
+	}
+	assert.Zero(t, calls, "empty API key must not invoke protected handlers")
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	assert.Equal(t, http.StatusOK, response.Code)
+}
+
+func TestHTTPServerDrainsOnCancellation(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	as := NewAgentServer(AgentServerOptions{
+		EngineMeta:          EngineMeta{APIKey: "secret"},
+		NativeMetricsSchema: MetricsSchemaShibuyaV1,
+		MetricsHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			close(entered)
+			<-release
+			_, _ = io.WriteString(w, "drained\n")
+		}),
+	})
+	as.updateSubStatus(true)
+
+	ready := make(chan string, 1)
+	shuttingDown := make(chan struct{})
+	srv := as.newHTTPServer("127.0.0.1:0")
+	srv.BaseContext = func(listener net.Listener) context.Context {
+		ready <- listener.Addr().String()
+		return context.Background()
+	}
+	srv.RegisterOnShutdown(func() { close(shuttingDown) })
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- httpserver.StartServer(srv, "", "", ctx) }()
+
+	var addr string
+	select {
+	case addr = <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for HTTP server to bind")
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	defer client.CloseIdleConnections()
+
+	healthResp, err := client.Get("http://" + addr + "/healthz")
+	require.NoError(t, err)
+	_ = healthResp.Body.Close()
+	assert.Equal(t, http.StatusOK, healthResp.StatusCode)
+
+	type scrapeResult struct {
+		status int
+		body   string
+		err    error
+	}
+	scraped := make(chan scrapeResult, 1)
+	go func() {
+		req, reqErr := http.NewRequest(http.MethodGet, "http://"+addr+"/metrics", nil)
+		if reqErr != nil {
+			scraped <- scrapeResult{err: reqErr}
+			return
+		}
+		req.Header.Set("Authorization", "Bearer secret")
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			scraped <- scrapeResult{err: doErr}
+			return
+		}
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(resp.Body)
+		scraped <- scrapeResult{status: resp.StatusCode, body: string(body), err: readErr}
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for in-flight metrics scrape")
+	}
+
+	cancel()
+	select {
+	case <-shuttingDown:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for server shutdown")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("server returned before draining in-flight scrape: %v", err)
+	default:
+	}
+
+	release <- struct{}{}
+	select {
+	case res := <-scraped:
+		require.NoError(t, res.err)
+		assert.Equal(t, http.StatusOK, res.status)
+		assert.Equal(t, "drained\n", res.body)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for drained scrape response")
+	}
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for HTTP server exit")
+	}
 }
 
 func TestNativeMetricsProxyPreservesTargetAndFailure(t *testing.T) {

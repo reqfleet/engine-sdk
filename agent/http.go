@@ -2,14 +2,17 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/reqfleet/lib/http/auth"
+	"github.com/reqfleet/lib/http/route"
+	httpserver "github.com/reqfleet/lib/http/server"
 )
 
 func (as *AgentServer) metricsHandler() http.Handler {
@@ -49,43 +52,39 @@ func (as *AgentServer) metricsHandler() http.Handler {
 
 // Handler returns the authenticated agent HTTP endpoints. Health checks bypass authentication.
 func (as *AgentServer) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /progress", as.handleProcessCheck)
-	mux.HandleFunc("GET /prepare-progress", as.handlePreparationCheck)
-	mux.Handle("GET /metrics", as.metricsHandler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if as.isSubscribed() {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		http.Error(w, "not subscribed to coordinator", http.StatusServiceUnavailable)
+	public := route.NewRouter("agent-public", "")
+	public.AddRoutes(route.Routes{
+		{Name: "healthz", Method: http.MethodGet, Path: "/healthz", HandlerFunc: as.handleHealthz},
 	})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
-			mux.ServeHTTP(w, r)
-			return
-		}
-		bearer := r.Header.Get("Authorization")
-		if bearer == "" {
-			http.Error(w, "bearer header is empty", http.StatusBadRequest)
-			return
-		}
-		token := strings.Split(bearer, " ")
-		if len(token) != 2 || token[0] != "Bearer" {
-			http.Error(w, "token is invalid", http.StatusBadRequest)
-			return
-		}
-		if token[1] != as.options.EngineMeta.APIKey {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		mux.ServeHTTP(w, r)
+	protected := route.NewRouter("agent", "")
+	protected.AddRoutes(route.Routes{
+		{Name: "progress", Method: http.MethodGet, Path: "/progress", HandlerFunc: as.handleProcessCheck},
+		{Name: "prepare-progress", Method: http.MethodGet, Path: "/prepare-progress", HandlerFunc: as.handlePreparationCheck},
+		{Name: "metrics", Method: http.MethodGet, Path: "/metrics", HandlerFunc: as.metricsHandler().ServeHTTP},
 	})
+	mux := public.Mux()
+	mux.Handle("/", auth.AuthRequiredWithToken(protected.Mux(), as.options.EngineMeta.APIKey))
+	return mux
 }
 
-func (as *AgentServer) startHTTPServer() error {
+func (as *AgentServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	if as.isSubscribed() {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Error(w, "not subscribed to coordinator", http.StatusServiceUnavailable)
+}
+
+func (as *AgentServer) newHTTPServer(addr string) *http.Server {
+	return &http.Server{
+		Addr:    addr,
+		Handler: as.Handler(),
+	}
+}
+
+func (as *AgentServer) startHTTPServer(ctx context.Context) error {
 	// Engines are never directly exposed to the public network.
-	return http.ListenAndServe(":8080", as.Handler())
+	return httpserver.StartServer(as.newHTTPServer(":8080"), "", "", ctx)
 }
 
 func (as *AgentServer) handleProcessCheck(w http.ResponseWriter, r *http.Request) {

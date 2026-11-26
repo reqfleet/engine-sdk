@@ -222,6 +222,9 @@ func (as *AgentServer) getPreparationProgress() *protocol.PreparationProgress {
 
 func (as *AgentServer) runRequestWorker(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return

@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
 	"syscall"
 	"time"
@@ -26,10 +28,22 @@ func (as *AgentServer) Run() error {
 	if options.EngineMeta.CoordinatorIP == "" {
 		return fmt.Errorf("coordinator endpoint is not configured")
 	}
-	go as.runRequestWorker(context.Background())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		as.runRequestWorker(runCtx)
+	}()
 	go func() {
 		for {
-			time.Sleep(2 * time.Second)
+			select {
+			case <-runCtx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			msgChan, err := as.SubscribeToCoordinator()
 			if err != nil {
 				options.Logger.Error(err)
@@ -40,7 +54,10 @@ func (as *AgentServer) Run() error {
 			as.listenToCoordinator(msgChan)
 		}
 	}()
-	return as.startHTTPServer()
+	err := as.startHTTPServer(ctx)
+	cancelRun()
+	<-workerDone
+	return err
 }
 
 func (as *AgentServer) runCommand(run *agentRun) error {
