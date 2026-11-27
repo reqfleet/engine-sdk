@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -367,4 +368,81 @@ func TestSequentialRunsClearArtifactsButRetainDependencyState(t *testing.T) {
 	waitRunState(t, f, "second", protocol.RunCompleted)
 	f.server.stopRun("first", protocol.StopCanceled)
 	assert.Equal(t, protocol.RunCompleted, readProgressForTest(t, f.server).State)
+}
+
+func TestCoordinatorSubscriberStopsOnCancel(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	subscribed := make(chan struct{})
+	peerClosed := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		var topic protocol.Topic
+		if decodeErr := json.NewDecoder(conn).Decode(&topic); decodeErr != nil {
+			return
+		}
+		close(subscribed)
+		var buf [1]byte
+		_, _ = conn.Read(buf[:])
+		close(peerClosed)
+	}()
+
+	as := NewAgentServer(AgentServerOptions{
+		EngineMeta: EngineMeta{
+			CollectionID: "collection",
+			PlanID:       "plan",
+			EngineID:     "0",
+			APIKey:       "secret",
+		},
+	})
+	as.pubsubClient.Addr = listener.Addr().String()
+	as.pubsubClient.TLSConfig = nil
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		as.runCoordinatorSubscriber(ctx, time.Millisecond)
+	}()
+
+	select {
+	case <-subscribed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not connect")
+	}
+	require.Eventually(t, as.isSubscribed, 5*time.Second, 5*time.Millisecond)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not stop on cancellation")
+	}
+	select {
+	case <-peerClosed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pubsub connection was not closed on cancellation")
+	}
+	assert.False(t, as.isSubscribed())
+
+	canceledCtx, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	messages := make(chan protocol.Message, 1)
+	messages <- &protocol.Payload{
+		Verb: protocol.VerbStart,
+		PlanMessage: protocol.PlanMessage{
+			"plan": runMessage(protocol.VerbStart, "late-run", ""),
+		},
+	}
+	close(messages)
+	as.listenToCoordinatorContext(canceledCtx, messages)
+	assert.Empty(t, as.requests, "canceled listener must not queue late coordinator commands")
+	assert.Empty(t, as.getRunProgressStatus("late-run").State)
 }

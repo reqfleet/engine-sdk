@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
 	"syscall"
 	"time"
@@ -26,21 +28,39 @@ func (as *AgentServer) Run() error {
 	if options.EngineMeta.CoordinatorIP == "" {
 		return fmt.Errorf("coordinator endpoint is not configured")
 	}
-	go as.runRequestWorker(context.Background())
-	go func() {
-		for {
-			time.Sleep(2 * time.Second)
-			msgChan, err := as.SubscribeToCoordinator()
-			if err != nil {
-				options.Logger.Error(err)
-				as.updateSubStatus(false)
-				continue
-			}
-			as.updateSubStatus(true)
-			as.listenToCoordinator(msgChan)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	var workers sync.WaitGroup
+	workers.Go(func() { as.runRequestWorker(runCtx) })
+	workers.Go(func() { as.runCoordinatorSubscriber(runCtx, 2*time.Second) })
+	err := as.startHTTPServer(ctx)
+	cancelRun()
+	workers.Wait()
+	return err
+}
+
+func (as *AgentServer) runCoordinatorSubscriber(ctx context.Context, retryDelay time.Duration) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryDelay):
 		}
-	}()
-	return as.startHTTPServer()
+		msgChan, conn, err := as.subscribeToCoordinator()
+		if err != nil {
+			as.options.Logger.Error(err)
+			as.updateSubStatus(false)
+			continue
+		}
+		stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		as.updateSubStatus(true)
+		as.listenToCoordinatorContext(ctx, msgChan)
+		stopClose()
+		_ = conn.Close()
+		as.updateSubStatus(false)
+	}
 }
 
 func (as *AgentServer) runCommand(run *agentRun) error {
