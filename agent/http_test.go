@@ -17,7 +17,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/reqfleet/engine-sdk/protocol"
-	httpserver "github.com/reqfleet/lib/http/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -279,7 +278,8 @@ func TestHandlerEmptyAPIKeyDeniesProtectedRoutes(t *testing.T) {
 func TestHTTPServerDrainsOnCancellation(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	defer close(release)
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	defer releaseOnce()
 	as := NewAgentServer(AgentServerOptions{
 		EngineMeta:          EngineMeta{APIKey: "secret"},
 		NativeMetricsSchema: MetricsSchemaShibuyaV1,
@@ -304,7 +304,7 @@ func TestHTTPServerDrainsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- httpserver.StartServer(srv, "", "", ctx) }()
+	go func() { done <- as.serveHTTP(ctx, srv) }()
 
 	var addr string
 	select {
@@ -318,6 +318,7 @@ func TestHTTPServerDrainsOnCancellation(t *testing.T) {
 
 	healthResp, err := client.Get("http://" + addr + "/healthz")
 	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, healthResp.Body)
 	_ = healthResp.Body.Close()
 	assert.Equal(t, http.StatusOK, healthResp.StatusCode)
 
@@ -362,7 +363,7 @@ func TestHTTPServerDrainsOnCancellation(t *testing.T) {
 	default:
 	}
 
-	release <- struct{}{}
+	releaseOnce()
 	select {
 	case res := <-scraped:
 		require.NoError(t, res.err)

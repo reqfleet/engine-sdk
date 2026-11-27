@@ -82,9 +82,13 @@ func (as *AgentServer) newHTTPServer(addr string) *http.Server {
 	}
 }
 
+func (as *AgentServer) serveHTTP(ctx context.Context, srv *http.Server) error {
+	return httpserver.StartServer(srv, "", "", ctx)
+}
+
 func (as *AgentServer) startHTTPServer(ctx context.Context) error {
 	// Engines are never directly exposed to the public network.
-	return httpserver.StartServer(as.newHTTPServer(":8080"), "", "", ctx)
+	return as.serveHTTP(ctx, as.newHTTPServer(":8080"))
 }
 
 func (as *AgentServer) handleProcessCheck(w http.ResponseWriter, r *http.Request) {

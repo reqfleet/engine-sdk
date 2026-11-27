@@ -200,15 +200,20 @@ func (as *AgentServer) tailFunc(ctx context.Context, filepath, runID string) {
 }
 
 func (as *AgentServer) SubscribeToCoordinator() (chan protocol.Message, error) {
+	msgChan, _, err := as.subscribeToCoordinator()
+	return msgChan, err
+}
+
+func (as *AgentServer) subscribeToCoordinator() (chan protocol.Message, net.Conn, error) {
 	collectionID := as.options.EngineMeta.CollectionID
-	msgChan, _, err := as.pubsubClient.Subscribe(fmt.Sprintf("collection:%s", collectionID), func() protocol.Message {
+	msgChan, conn, err := as.pubsubClient.Subscribe(fmt.Sprintf("collection:%s", collectionID), func() protocol.Message {
 		return &protocol.Payload{}
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	as.logger.Infof("Subscribe to coordinator at %s", as.reqOpts.Endpoint)
-	return msgChan, nil
+	return msgChan, conn, nil
 }
 
 // streamToLogger reads from a pipe and logs each line in a separate goroutine
@@ -256,8 +261,15 @@ func upsertEnv(env []string, key, value string) []string {
 }
 
 func (as *AgentServer) listenToCoordinator(msgChan chan protocol.Message) {
+	as.listenToCoordinatorContext(context.Background(), msgChan)
+}
+
+func (as *AgentServer) listenToCoordinatorContext(ctx context.Context, msgChan chan protocol.Message) {
 	engineMeta := as.options.EngineMeta
 	for msg := range msgChan {
+		if ctx.Err() != nil {
+			continue
+		}
 		pl := msg.(*protocol.Payload)
 		planMsg, ok := pl.PlanMessage[engineMeta.PlanID]
 		if !ok {

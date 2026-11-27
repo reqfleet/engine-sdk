@@ -32,32 +32,38 @@ func (as *AgentServer) Run() error {
 	defer stop()
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		as.runRequestWorker(runCtx)
-	}()
-	go func() {
-		for {
-			select {
-			case <-runCtx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-			msgChan, err := as.SubscribeToCoordinator()
-			if err != nil {
-				options.Logger.Error(err)
-				as.updateSubStatus(false)
-				continue
-			}
-			as.updateSubStatus(true)
-			as.listenToCoordinator(msgChan)
-		}
-	}()
+	var workers sync.WaitGroup
+	workers.Go(func() { as.runRequestWorker(runCtx) })
+	workers.Go(func() { as.runCoordinatorSubscriber(runCtx, 2*time.Second) })
 	err := as.startHTTPServer(ctx)
 	cancelRun()
-	<-workerDone
+	workers.Wait()
 	return err
+}
+
+func (as *AgentServer) runCoordinatorSubscriber(ctx context.Context, retryDelay time.Duration) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryDelay):
+		}
+		msgChan, conn, err := as.subscribeToCoordinator()
+		if err != nil {
+			as.options.Logger.Error(err)
+			as.updateSubStatus(false)
+			continue
+		}
+		stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		as.updateSubStatus(true)
+		as.listenToCoordinatorContext(ctx, msgChan)
+		stopClose()
+		_ = conn.Close()
+		as.updateSubStatus(false)
+	}
 }
 
 func (as *AgentServer) runCommand(run *agentRun) error {
