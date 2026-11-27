@@ -43,9 +43,6 @@ func (as *AgentServer) Run() error {
 
 func (as *AgentServer) runCoordinatorSubscriber(ctx context.Context, retryDelay time.Duration) {
 	for {
-		if ctx.Err() != nil {
-			return
-		}
 		select {
 		case <-ctx.Done():
 			return
